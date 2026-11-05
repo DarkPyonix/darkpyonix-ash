@@ -9,7 +9,14 @@
  */
 
 import { abilitiesOf, describeCapabilities, isReadOnly, ShareAbilities } from "./capabilities";
-import { REVOKED_MESSAGE, ShareClient, ShareHttpError, TokenRevokedError } from "./client";
+import {
+  REVOKED_MESSAGE,
+  ShareClient,
+  ShareForbiddenError,
+  ShareHttpError,
+  ShareNetworkError,
+  TokenRevokedError,
+} from "./client";
 import { ShareEditor } from "./edit";
 import { ShareDoc } from "./doc";
 import { parseShareLink, ShareLink, stripTokenFromLocation } from "./parse";
@@ -191,4 +198,17 @@ export function gateControls(
  */
 export function shouldWatch(a: ShareAbilities): boolean {
   return a.canRead;
+}
+
+/** Korean text for a failed REST call of a live share (never contains the token). */
+export function shareErrorMessage(e: unknown): string {
+  if (e instanceof ShareForbiddenError) return "이 공유에는 그 작업의 권한이 없습니다";
+  if (e instanceof ShareHttpError) {
+    if (e.status === 401) return "인증에 실패했습니다";
+    if (e.status === 403) return "이 공유에는 그 작업의 권한이 없습니다";
+    if (e.status === 404) return FAILURE_MESSAGES.not_found;
+    if (e.status === 409 && e.code === "busy") return "다른 실행이 진행 중입니다";
+  }
+  if (e instanceof ShareNetworkError) return FAILURE_MESSAGES.network;
+  return "요청을 처리하지 못했습니다";
 }

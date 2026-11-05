@@ -299,7 +299,7 @@ describe("FR-A6 revocation detection without history", () => {
   });
   it("test_fr_a6_read_only_watch_does_not_ask_for_history_and_revocation_ends_it", async () => {
     FakeWs.all = [];
-    const f = jest.fn(async () => ok({ code: "token_revoked" }, 401));
+    const f = jest.fn(async () => ok({ error: { code: "token_revoked", message: "x" } }, 401));
     const client = new ShareClient({
       managerUrl: "http://m:1",
       kernelId: "k1",

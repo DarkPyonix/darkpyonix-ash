@@ -423,6 +423,19 @@ describe("FR-S3 edit safety", () => {
     expect(timers.filter((t) => !t.cleared && t.ms === 2000)).toEqual([]); // no retry
     expect(errors).toEqual([]); // a revoked share is reported once, centrally, not by the editor
   });
+  it("test_fr_a6_after_revocation_nothing_more_is_fetched_and_no_unsaved_warning_covers_the_banner", async () => {
+    const { editor, calls, errors } = setupEditor((m) =>
+      m === "PATCH" ? ok({ error: { code: "token_revoked", message: "x" } }, 401) : ok({})
+    );
+    editor.localChange("a", "first");
+    await editor.flush("a");
+    editor.localChange("a", "other cell edit pending");
+    const before = calls.length;
+    await editor.dispose(true);
+    await editor.dispose(false);
+    expect(calls.length).toBe(before); // no lock, unlock or save goes out for a revoked share
+    expect(errors).toEqual([]); // UNSAVED_MESSAGE would hide the "공유가 해지되었습니다" banner
+  });
   it("test_fr_a3_after_dispose", async () => {
     const { editor } = setupEditor(() => ok({}));
     await editor.dispose();

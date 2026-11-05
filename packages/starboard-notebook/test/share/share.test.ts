@@ -154,6 +154,7 @@ describe("FR-A3 REST client", () => {
 
 class FakeWs {
   static last: FakeWs;
+  static all: FakeWs[] = [];
   sent: string[] = [];
   onopen: any;
   onerror: any;
@@ -162,6 +163,7 @@ class FakeWs {
   open = false;
   constructor(public url: string) {
     FakeWs.last = this;
+    FakeWs.all.push(this);
   }
   send(s: string) {
     if (!this.open) throw new Error("InvalidStateError");
@@ -382,6 +384,36 @@ describe("FR-A3 revoked share state", () => {
     expect(f).not.toHaveBeenCalled();
   });
 
+  it("test_fr_a3_concurrent_in_flight_requests_fire_on_revoked_once", async () => {
+    const f = jest.fn().mockResolvedValue(ok(revokedBody, 401));
+    const seen = jest.fn();
+    const c = mk(f, seen);
+    const results = await Promise.allSettled([c.document(), c.runs(), c.interrupt(), c.lockCell("c1")]);
+    expect(results.every((r) => r.status === "rejected")).toBe(true);
+    expect(f).toHaveBeenCalledTimes(4); // all four were in flight before the first answer
+    expect(seen).toHaveBeenCalledTimes(1);
+  });
+  it("test_fr_a3_shutdown_blocks_everything_like_a_revocation", async () => {
+    const f = jest.fn();
+    const c = mk(f);
+    expect(c.blocked).toBe(false);
+    c.shutdown();
+    expect(c.blocked).toBe(true);
+    expect(c.revoked).toBe(false); // ended by the page, not revoked by the server
+    for (const call of everyCall(c)) {
+      await expect(Promise.resolve().then(call)).rejects.toBeInstanceOf(TokenRevokedError);
+    }
+    expect(() => c.openSocket({ onMessage: () => undefined })).toThrow(TokenRevokedError);
+    expect(f).not.toHaveBeenCalled();
+  });
+  it("test_fr_a3_no_socket_is_opened_for_a_revoked_share", async () => {
+    const f = jest.fn().mockResolvedValue(ok(revokedBody, 401));
+    const c = mk(f);
+    await c.document().catch(() => undefined);
+    const before = FakeWs.all?.length ?? 0;
+    expect(() => c.openSocket({ onMessage: () => undefined })).toThrow(TokenRevokedError);
+    expect(FakeWs.all?.length ?? 0).toBe(before);
+  });
   it("test_fr_a3_verify_blacklisted_marks_the_share_revoked", async () => {
     const f = jest.fn().mockResolvedValue(ok({ valid: true, blacklisted: true, capabilities: ["read"] }));
     const seen = jest.fn();

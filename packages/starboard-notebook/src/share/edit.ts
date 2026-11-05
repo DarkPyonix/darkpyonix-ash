@@ -296,7 +296,8 @@ export class ShareEditor {
           this.base.delete(id);
         })
       );
-      if (lost.length) this.h.onError(UNSAVED_MESSAGE);
+      // A revoked or ended share is reported once, centrally; do not cover that with this warning.
+      if (lost.length && !this.client.blocked) this.h.onError(UNSAVED_MESSAGE);
     })();
     return this.disposing;
   }

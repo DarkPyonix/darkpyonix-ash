@@ -6,8 +6,10 @@ import { Runtime } from "../types";
 import { documentToCells, connectShare, gateControls, shouldWatch, ShareConnectError, ShareSession } from "./page";
 import { parseShareLink } from "./parse";
 import { outputsToElement } from "./outputs";
-import { ShareWatch, WatchEnd } from "./watch";
-import { REVOKED_MESSAGE, TokenRevokedError } from "./client";
+import { ShareWatch } from "./watch";
+import { TokenRevokedError } from "./client";
+import { createShareEnder } from "./end";
+import { shareErrorMessage } from "./page";
 import { ShareDoc, DocChange } from "./doc";
 import { ShareEditor } from "./edit";
 import { arrayMoveElement } from "../components/helpers/array";
@@ -49,7 +51,7 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
       const err = (msg: string) => showStatus(msg, true);
       /** A revoked share is reported once by endShare, not by every failing call. */
       const failed = (prefix: string) => (e: unknown) => {
-        if (!(e instanceof TokenRevokedError)) err(`${prefix}: ${(e as Error).message}`);
+        if (!(e instanceof TokenRevokedError)) err(`${prefix}: ${shareErrorMessage(e)}`);
       };
       let editor: ShareEditor | undefined;
 
@@ -146,25 +148,14 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
         rt.controls.runAllCells = async () => false;
         rt.dom.notebook.shareInterrupt = undefined;
       };
-      /**
-       * The one place that ends a share: revoked (a REST 401 token_revoked or the socket watch),
-       * token no longer valid, or connection lost. Idempotent; blocks every operation and frees locks.
-       */
-      let ended = false;
-      const endShare = (why: WatchEnd) => {
-        if (ended) return;
-        ended = true;
-        blockAll();
-        void editor?.dispose(); // free locks and stop retries; errors are swallowed
-        showStatus(
-          why === "revoked"
-            ? REVOKED_MESSAGE
-            : why === "unauthorized"
-            ? "공유 토큰이 더 이상 유효하지 않습니다"
-            : "매니저와 연결이 끊겼습니다. 페이지를 다시 불러오세요",
-          true
-        );
-      };
+      let watch: ShareWatch | undefined;
+      const endShare = createShareEnder({
+        client: session.client,
+        watch: () => watch,
+        editor: () => editor,
+        blockControls: blockAll,
+        showStatus,
+      });
       session.client.onRevoked = () => endShare("revoked");
 
       if (!shouldWatch(session.abilities)) return;
@@ -177,7 +168,7 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
           for (const c of session.cells) put(c.cell_id, (c as any).outputs ?? []);
         });
       }
-      const watch = new ShareWatch(session.client, {
+      const w = new ShareWatch(session.client, {
         onOutputs: (id, outs) => {
           if (session.abilities.canSeeOutputs) put(id, outs);
         },
@@ -195,8 +186,9 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
         blockAll();
         showStatus("페이지가 이전 상태로 복원되었습니다. 공유 링크로 다시 접속하세요", true);
       });
-      watch.start();
-      window.addEventListener("pagehide", () => watch.stop(), { once: true });
+      watch = w;
+      w.start();
+      window.addEventListener("pagehide", () => w.stop(), { once: true });
     })
     .catch((e) => {
       showStatus(e instanceof ShareConnectError ? e.message : "공유에 연결하지 못했습니다", true);
