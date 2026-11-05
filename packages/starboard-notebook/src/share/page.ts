@@ -9,7 +9,7 @@
  */
 
 import { abilitiesOf, describeCapabilities, isReadOnly, ShareAbilities } from "./capabilities";
-import { ShareClient, ShareForbiddenError, ShareHttpError, TokenRevokedError } from "./client";
+import { ShareClient, ShareHttpError, TokenRevokedError } from "./client";
 import { parseShareLink, ShareLink, stripTokenFromLocation } from "./parse";
 
 export type ShareFailure = "no_link" | "missing_target" | "revoked" | "unauthorized" | "not_found" | "network";
@@ -135,7 +135,13 @@ export function gateControls(controls: GateableControls, session: ShareSession, 
   controls.clearAllCells = () => undefined;
   const remoteRun = (body: { mode: string; [k: string]: unknown }) => {
     if (!session.abilities.canExecute) return false;
-    session.client.run(body).catch((e) => onError(e instanceof ShareForbiddenError ? e : e));
+    try {
+      session.client.run(body).catch(onError);
+    } catch (e) {
+      // `need()` throws synchronously when the capability is missing.
+      onError(e);
+      return false;
+    }
     return true;
   };
   controls.runCell = (opts: { id: string }) => remoteRun({ mode: "cells", cell_ids: [opts.id], on_busy: "reject" });

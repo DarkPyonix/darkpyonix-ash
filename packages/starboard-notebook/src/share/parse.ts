@@ -28,17 +28,21 @@ export function parseShareLink(href: string): ShareLink | null {
     return null;
   }
   const frag = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : "");
-  // A bare fragment is the token itself (`#<token>`); `#token=<token>` is also fine.
-  const bareFragment = url.hash.length > 1 && !url.hash.includes("=") ? url.hash.slice(1) : null;
-  const token = frag.get("token") || bareFragment || url.searchParams.get("token");
+  const last = url.pathname.split("/").filter(Boolean).pop();
+  const shareId = last && SHARE_ID_RE.test(last) ? last : undefined;
+  const manager = url.searchParams.get("manager");
+  const kernel = url.searchParams.get("kernel");
+  const explicit = frag.get("token") || url.searchParams.get("token");
+  // A bare fragment (`#<token>`) is a token only on a share path or with a manager+kernel pair;
+  // otherwise `index.html#anchor` is an ordinary page and must stay stock.
+  const bare =
+    url.hash.length > 1 && !url.hash.includes("=") && (shareId || (manager && kernel)) ? url.hash.slice(1) : null;
+  const token = explicit || bare;
   if (!token) return null;
 
-  const last = url.pathname.split("/").filter(Boolean).pop();
   const link: ShareLink = { token };
-  if (last && SHARE_ID_RE.test(last)) link.shareId = last;
-  const manager = url.searchParams.get("manager");
+  if (shareId) link.shareId = shareId;
   if (manager) link.managerUrl = manager.replace(/\/+$/, "");
-  const kernel = url.searchParams.get("kernel");
   if (kernel) link.kernelId = kernel;
   return link;
 }

@@ -97,8 +97,12 @@ export class StarboardNotebookElement extends LitElement {
     return syncPluginsPromise;
   }
 
+  /** Set by bootShare: a share page shows a remote notebook, so no local plugins or Python start. */
+  public isShareMode = false;
+
   async notebookInitialize() {
     await this.updateComplete;
+    if (this.isShareMode) return;
 
     if (!this.initialRunStarted) {
       await this.loadPlugins();

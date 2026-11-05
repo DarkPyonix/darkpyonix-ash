@@ -34,7 +34,7 @@ describe("FR-A2 share page", () => {
     expect(await connectShare({ href: "https://ash.test/", replaceAddress: jest.fn() })).toBeNull();
   });
   it("test_fr_a2_missing_manager_is_reported_in_korean", async () => {
-    const e = await connectShare({ href: `https://ash.test/#${TOKEN}`, replaceAddress: jest.fn() }).catch(
+    const e = await connectShare({ href: `https://ash.test/#token=${TOKEN}`, replaceAddress: jest.fn() }).catch(
       (x: any) => x
     );
     expect(e).toBeInstanceOf(ShareConnectError);

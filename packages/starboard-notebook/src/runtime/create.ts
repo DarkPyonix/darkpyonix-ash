@@ -364,7 +364,7 @@ export function setupRuntime(notebook: StarboardNotebookElement): Runtime {
   setupGlobalKeybindings(rt);
 
   // Share link (FR-A2, FR-A3): a share page shows the remote notebook under its capability gates.
-  bootShare(rt, (text, isError) => notebook.setShareStatus(text, isError));
+  notebook.isShareMode = bootShare(rt, (text, isError) => notebook.setShareStatus(text, isError));
 
   /** Initialize certain functionality */
   updateCellsWhenCellDefinitionChanges(rt);

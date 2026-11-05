@@ -32,12 +32,22 @@ Refs DarkPyonix/darkpyonix#20, SPEC FR-A2, FR-A3, FR-S9. 실제 브라우저와 
 업그레이드가 거절되면(토큰 폐기 등) 브라우저는 상태 코드를 숨기고 `neverOpened: true`로 닫힙니다. 그래서 연결 전에 `verify()`로 먼저 401 `token_revoked`와 권한을 확인합니다.
 
 ## 4. ash 페이지에서 확인 [PR2 후]
-`https://<ash 주소>/?manager=<매니저 URL>&kernel=<커널 ID>#<token>`을 엽니다.
+`https://<ash 주소>/?manager=<매니저 URL>&kernel=<커널 ID>#<token>`을 엽니다. 공유 모드에 들어가는 조건은 `#token=`/`?token=`이 있거나, 맨 `#<token>`이 `/s/<share_id>` 경로 또는 `manager`+`kernel` 쌍과 함께 있을 때입니다. `index.html#anchor` 같은 평범한 주소는 기존 동작 그대로입니다.
+
+지금 되는 것:
 - 읽은 직후 주소창에서 토큰이 사라집니다(`history.replaceState`).
-- read: 셀 코드만 보이고 출력과 실행 단추가 없고, 편집할 수 없습니다. 상단에 "읽기 전용" 안내가 뜹니다.
-- read+history: 출력이 보이고 실행은 못 합니다.
-- read+history+execute: 실행과 인터럽트가 됩니다. 코드 수정은 못 합니다.
-- 공유를 폐기하면(아래) 연결이 끊기고 "공유가 폐기되었습니다"가 보입니다.
+- 로컬 셀과 로컬 파이썬 런타임은 시작하지 않습니다. 원격 문서의 셀이 잠긴 상태로 보입니다(코드만).
+- 상단에 한국어 안내가 뜹니다. `execute`나 `edit`이 없으면 "읽기 전용 공유: ..."입니다.
+- 셀 추가·삭제·이동·유형 변경 같은 편집은 모두 막힙니다(`edit`이 있어도 이번 버전은 읽기 전용 표시).
+- 실행 단추는 화면에 남아 있습니다. `execute`가 없으면 눌러도 아무 요청도 보내지 않습니다. `execute`가 있으면 `POST /api/kernels/<id>/runs`로 원격 실행을 요청하고(로컬 실행 아님), 오류는 안내 줄에 뜹니다.
+- 토큰이 틀리면 "공유 토큰이 올바르지 않습니다", 폐기된 토큰이면 "공유가 폐기되었습니다", 커널이 없으면 "공유된 커널을 찾을 수 없습니다"가 안내 줄에 뜹니다.
+
+후속(이번 PR에서 아직 안 됨, 확인 항목 아님):
+- 원격 출력과 실행 기록 렌더링(`history`가 있어도 출력은 화면에 안 나옵니다. 2절의 REST/WS로만 확인).
+- 인터럽트.
+- 실행 진행 이벤트 표시(WS/SSE).
+- 로드한 뒤 공유를 폐기했을 때 연결 끊김 감지(페이지가 WS도 폴링도 열지 않으므로 다시 불러오거나 다음 요청에서 401을 받을 때 알게 됩니다).
+- 셀 편집(`edit`).
 
 ## 5. 폐기
 `curl -s -X DELETE -H "Authorization: Bearer $MASTER" $MANAGER/api/kernels/$KID/shares/$SHARE_ID` 뒤에 같은 토큰의 `verify`는 401 `token_revoked`이고 열려 있던 WebSocket은 닫힙니다.
