@@ -182,3 +182,13 @@ export function gateControls(
   controls.runCell = (opts: { id: string }) => remoteRun({ mode: "cells", cell_ids: [opts.id], on_busy: "reject" });
   controls.runAllCells = async () => remoteRun({ mode: "all", on_busy: "reject" });
 }
+
+/**
+ * Whether the page keeps the sync socket open. The WebSocket needs `read` and nothing more
+ * (SPEC FR-A3: "이벤트 스트림과 WebSocket 연결" is `read`), so every readable share is watched: that is
+ * how a revoked share is noticed (the kernel closes the streams of a revoked share, FR-A4/PROTOCOL 3.7.4).
+ * `history` only decides whether outputs are asked for and shown.
+ */
+export function shouldWatch(a: ShareAbilities): boolean {
+  return a.canRead;
+}

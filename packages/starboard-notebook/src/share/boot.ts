@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { Runtime } from "../types";
-import { documentToCells, connectShare, gateControls, ShareConnectError, ShareSession } from "./page";
+import { documentToCells, connectShare, gateControls, shouldWatch, ShareConnectError, ShareSession } from "./page";
 import { parseShareLink } from "./parse";
 import { outputsToElement } from "./outputs";
 import { ShareWatch } from "./watch";
@@ -130,7 +130,7 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
       }
       showStatus(session.banner, false);
 
-      if (!session.abilities.canSeeOutputs && !editable) return;
+      if (!shouldWatch(session.abilities)) return;
       const put = (id: string, outs: unknown) => {
         outputsCache.set(id, outs);
         showOutputs(rt, id, outs);

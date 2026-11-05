@@ -1,4 +1,13 @@
-import { ShareClient, ShareWatch, TokenRevokedError, outputsToElement, stripAnsi } from "../../src/share";
+import {
+  abilitiesOf,
+  parseCapabilities,
+  shouldWatch,
+  ShareClient,
+  ShareWatch,
+  TokenRevokedError,
+  outputsToElement,
+  stripAnsi,
+} from "../../src/share";
 
 const TOKEN = "tok-not-a-real-secret";
 const ok = (body: unknown, status = 200) => ({ ok: status < 400, status, json: async () => body });
@@ -266,5 +275,39 @@ describe("FR-R4 output rendering", () => {
   it("test_fr_r4_png_becomes_a_data_url_image", () => {
     const box: any = outputsToElement(fakeDoc, [{ output_type: "display_data", data: { "image/png": "AAAA\n" } }]);
     expect(box.children[0].src).toBe("data:image/png;base64,AAAA");
+  });
+});
+
+describe("FR-A6 revocation detection without history", () => {
+  const w = (caps: string[]) => shouldWatch(abilitiesOf(parseCapabilities(caps)));
+  it("test_fr_a6_every_readable_share_is_watched_even_without_history", () => {
+    expect(w(["read"])).toBe(true);
+    expect(w(["read", "execute"])).toBe(true);
+    expect(w(["read", "history"])).toBe(true);
+  });
+  it("test_fr_a6_a_share_without_read_has_no_socket", () => {
+    expect(w(["history"])).toBe(false);
+    expect(w(["execute", "edit"])).toBe(false);
+    expect(w([])).toBe(false);
+  });
+  it("test_fr_a6_read_only_watch_does_not_ask_for_history_and_revocation_ends_it", async () => {
+    FakeWs.all = [];
+    const f = jest.fn(async () => ok({ code: "token_revoked" }, 401));
+    const client = new ShareClient({
+      managerUrl: "http://m:1",
+      kernelId: "k1",
+      token: TOKEN,
+      capabilities: ["read"],
+      fetchImpl: f as any,
+      webSocketImpl: FakeWs as any,
+    });
+    const ends: string[] = [];
+    const watch = new ShareWatch(client, { onOutputs: () => undefined, onEnd: (e) => ends.push(e) });
+    watch.start();
+    FakeWs.all[0].doOpen();
+    expect(FakeWs.all[0].sent).toEqual([]); // no request_history without the history capability
+    FakeWs.all[0].onclose({ code: 1000, reason: "", wasClean: true });
+    await flush();
+    expect(ends).toEqual(["revoked"]);
   });
 });
