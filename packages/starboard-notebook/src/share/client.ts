@@ -7,9 +7,9 @@
  * PROTOCOL section 5. Errors and logs never contain the token (it is redacted from messages and
  * bodies, because the verify path and the WebSocket query carry it).
  *
- * Gating: once the capability set is known (after `verify()` or from the options), calls that
- * need a missing capability fail locally with `ShareForbiddenError` and send nothing. The server
- * remains the authority (INTENT D5); this only avoids pointless requests.
+ * Gating (default-deny): a call that needs a capability fails locally with `ShareForbiddenError`
+ * and sends nothing unless the capability set is known (after `verify()` or from the options)
+ * and holds it. The server remains the authority (INTENT D5, D18).
  */
 
 import { Capability, parseCapabilities } from "./capabilities";
@@ -26,13 +26,22 @@ export function generateClientId(): string {
   return "ash_" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * The error code of a server error body. The manager answers `{error: {code, message, data?}}`
+ * (docs/api Error schema); a flat `{code}` is accepted too.
+ */
+export function errorCode(body: unknown): string | undefined {
+  const b = body as any;
+  const c = b?.error?.code ?? b?.code;
+  return typeof c === "string" ? c : undefined;
+}
+
 export class ShareHttpError extends Error {
-  /** Server error code (`{code, message}` body), e.g. `token_revoked`, `forbidden`. */
+  /** Server error code, e.g. `token_revoked`, `forbidden`, `locked`, `conflict`. */
   code?: string;
   constructor(public status: number, public body: unknown) {
     super(`HTTP ${status}`);
-    const c = (body as any)?.code;
-    if (typeof c === "string") this.code = c;
+    this.code = errorCode(body);
   }
 }
 
@@ -120,10 +129,10 @@ export class ShareClient {
   }
 
   private need(c: Capability) {
-    if (this.caps && !this.caps.has(c)) throw new ShareForbiddenError(c);
+    if (!this.caps || !this.caps.has(c)) throw new ShareForbiddenError(c);
   }
 
-  async call(method: string, path: string, body?: unknown): Promise<any> {
+  private async call(method: string, path: string, body?: unknown, keepalive = false): Promise<any> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.opts.token}`,
       "X-DarkPyonix-Client": this.clientId,
@@ -135,6 +144,7 @@ export class ShareClient {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
+        ...(keepalive ? { keepalive: true } : {}),
       });
     } catch (e) {
       throw new ShareNetworkError(this.redact(String((e as Error)?.message ?? e)));
@@ -146,7 +156,7 @@ export class ShareClient {
       /* empty body */
     }
     if (!resp.ok) {
-      if (resp.status === 401 && (parsed as any)?.code === "token_revoked") throw new TokenRevokedError(parsed);
+      if (resp.status === 401 && errorCode(parsed) === "token_revoked") throw new TokenRevokedError(parsed);
       throw new ShareHttpError(resp.status, parsed);
     }
     return parsed;
@@ -175,6 +185,36 @@ export class ShareClient {
   run(body: { mode: string; [k: string]: unknown }) {
     this.need("execute");
     return this.call("POST", "/runs", body);
+  }
+  /** POST .../interrupt (needs execute). */
+  interrupt() {
+    this.need("execute");
+    return this.call("POST", "/interrupt");
+  }
+  /** POST .../cells (needs edit). `after`/`before` are cell ids; neither appends. */
+  createCell(body: { source?: string; type?: string; after?: string; before?: string }) {
+    this.need("edit");
+    return this.call("POST", "/cells", body);
+  }
+  /** PATCH .../cells/{id} (needs edit; 409 conflict when `base_version` is stale, 409 locked). */
+  updateCell(cellId: string, body: { base_version: number; source?: string; type?: string }) {
+    this.need("edit");
+    return this.call("PATCH", `/cells/${encodeURIComponent(cellId)}`, body);
+  }
+  /** DELETE .../cells/{id}?base_version= (needs edit). */
+  deleteCell(cellId: string, baseVersion: number) {
+    this.need("edit");
+    return this.call("DELETE", `/cells/${encodeURIComponent(cellId)}?base_version=${baseVersion}`);
+  }
+  /** POST .../cells/{id}/move (needs edit); `toIndex` >= 1 (0 is the preamble). */
+  moveCell(cellId: string, toIndex: number) {
+    this.need("edit");
+    return this.call("POST", `/cells/${encodeURIComponent(cellId)}/move`, { to_index: toIndex });
+  }
+  /** DELETE .../cells/{id}/lock (needs edit); optionally saves the final source. */
+  unlockCell(cellId: string, final?: { source: string; base_version: number }, keepalive = false) {
+    this.need("edit");
+    return this.call("DELETE", `/cells/${encodeURIComponent(cellId)}/lock`, final, keepalive);
   }
   /** PUT .../cells/{id}/lock (needs edit). */
   lockCell(cellId: string) {
@@ -240,7 +280,7 @@ export class ShareSocket {
 
   private need(c: Capability) {
     const caps = this.caps();
-    if (caps && !caps.has(c)) throw new ShareForbiddenError(c);
+    if (!caps || !caps.has(c)) throw new ShareForbiddenError(c);
   }
 
   /** Browsers throw on send before OPEN, so messages wait in a queue until it opens. */

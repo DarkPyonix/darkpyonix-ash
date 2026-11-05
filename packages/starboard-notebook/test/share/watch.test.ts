@@ -75,6 +75,14 @@ describe("FR-S9 live share", () => {
     });
     expect(outs).toEqual([["c1", [{ output_type: "stream" }]]]);
   });
+  it("test_fr_s9_unnamed_kernel_events_are_forwarded", () => {
+    const seen: any[] = [];
+    const { w } = setup(() => ok({}));
+    (w as any).h.onEvent = (t: string, d: any) => seen.push([t, d]);
+    w.onMessage({ type: "event", event: { seq: 4, type: "doc.cell.created", data: { cell: { cell_id: "n" } } } });
+    w.onMessage({ type: "event", event: { nope: true } });
+    expect(seen).toEqual([["doc.cell.created", { cell: { cell_id: "n" } }]]);
+  });
   it("test_fr_s9_execution_events_accumulate_then_final_replaces", () => {
     const { w, outs } = setup(() => ok({}));
     w.onMessage({ type: "execution_started", cell_id: "c1" });
@@ -181,7 +189,7 @@ describe("FR-A6 reconnect backoff", () => {
 
 describe("FR-A6 revoked share detection", () => {
   it("test_fr_a6_close_then_token_revoked_ends_the_watch", async () => {
-    const { w, ends, timers } = setup(() => ok({ code: "token_revoked" }, 401));
+    const { w, ends, timers } = setup(() => ok({ error: { code: "token_revoked", message: "x" } }, 401));
     w.start();
     FakeWs.all[0].doOpen();
     FakeWs.all[0].onclose({ code: 1000, reason: "", wasClean: true });
@@ -213,7 +221,7 @@ describe("FR-A6 revoked share detection", () => {
     expect(ends).toEqual(["lost"]);
   });
   it("test_fr_a6_stop_does_not_report_an_end", async () => {
-    const { w, ends } = setup(() => ok({ code: "token_revoked" }, 401));
+    const { w, ends } = setup(() => ok({ error: { code: "token_revoked", message: "x" } }, 401));
     w.start();
     w.stop();
     FakeWs.all[0].onclose({ code: 1000, reason: "", wasClean: true });
