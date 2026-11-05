@@ -28,7 +28,9 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
   })
     .then((session: ShareSession | null) => {
       if (!session) return;
-      gateControls(rt.controls as any, session, (e) => showStatus(`실행하지 못했습니다: ${(e as Error).message}`, true));
+      gateControls(rt.controls as any, session, (e) =>
+        showStatus(`실행하지 못했습니다: ${(e as Error).message}`, true)
+      );
       rt.content.cells.push(...(documentToCells(session.cells) as any));
       rt.dom.notebook.requestUpdate();
       showStatus(session.banner, false);

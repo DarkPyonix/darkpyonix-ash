@@ -22,7 +22,10 @@ function deps(responses: Record<string, any>, replaced: string[] = []) {
 describe("FR-A2 share page", () => {
   it("test_fr_a2_page_removes_the_token_from_the_address_right_after_reading", async () => {
     const replaced: string[] = [];
-    const { d } = deps({ "/verify": ok({ valid: true, capabilities: ["read"] }), "/document": ok({ cells: [] }) }, replaced);
+    const { d } = deps(
+      { "/verify": ok({ valid: true, capabilities: ["read"] }), "/document": ok({ cells: [] }) },
+      replaced
+    );
     await connectShare(d);
     expect(replaced).toEqual(["https://ash.test/?manager=http%3A%2F%2Fm%3A1&kernel=k1"]);
     expect(replaced.join()).not.toContain(TOKEN);
@@ -31,7 +34,9 @@ describe("FR-A2 share page", () => {
     expect(await connectShare({ href: "https://ash.test/", replaceAddress: jest.fn() })).toBeNull();
   });
   it("test_fr_a2_missing_manager_is_reported_in_korean", async () => {
-    const e = await connectShare({ href: `https://ash.test/#${TOKEN}`, replaceAddress: jest.fn() }).catch((x: any) => x);
+    const e = await connectShare({ href: `https://ash.test/#${TOKEN}`, replaceAddress: jest.fn() }).catch(
+      (x: any) => x
+    );
     expect(e).toBeInstanceOf(ShareConnectError);
     expect(e.failure).toBe("missing_target");
     expect(e.message).toContain("매니저");
@@ -50,9 +55,19 @@ describe("FR-A3 share page gating", () => {
   const mkControls = () => {
     const c: any = {};
     for (const k of [
-      "insertCell", "removeCell", "moveCell", "moveCellToIndex", "changeCellType",
-      "setCellProperty", "resetCell", "clearCell", "clearAllCells", "runCell", "runAllCells",
-    ]) c[k] = jest.fn(() => "local");
+      "insertCell",
+      "removeCell",
+      "moveCell",
+      "moveCellToIndex",
+      "changeCellType",
+      "setCellProperty",
+      "resetCell",
+      "clearCell",
+      "clearAllCells",
+      "runCell",
+      "runAllCells",
+    ])
+      c[k] = jest.fn(() => "local");
     return c;
   };
   const session = async (caps: string[]) => {
@@ -100,7 +115,13 @@ describe("FR-A3 share page gating", () => {
     expect(c.setCellProperty({})).toBe(false);
   });
   it("test_fr_a3_document_cells_become_locked_notebook_cells", async () => {
-    const cells = documentToCells([{ cell_id: "c1", type: "code", source: "x=1\n" }, { cell_id: "c2", type: "markdown", source: "hi" }]);
-    expect(cells.map((c: any) => [c.id, c.cellType, c.metadata.properties.locked])).toEqual([["c1", "python", true], ["c2", "markdown", true]]);
+    const cells = documentToCells([
+      { cell_id: "c1", type: "code", source: "x=1\n" },
+      { cell_id: "c2", type: "markdown", source: "hi" },
+    ]);
+    expect(cells.map((c: any) => [c.id, c.cellType, c.metadata.properties.locked])).toEqual([
+      ["c1", "python", true],
+      ["c2", "markdown", true],
+    ]);
   });
 });

@@ -91,18 +91,24 @@ describe("FR-A3 REST client", () => {
   });
   it("test_fr_a3_network_error_and_body_never_contain_the_token", async () => {
     const f = jest.fn().mockRejectedValue(new Error(`failed to fetch http://m/tokens/${TOKEN}/verify`));
-    const e = await mkClient(f).verify().catch((x) => x);
+    const e = await mkClient(f)
+      .verify()
+      .catch((x) => x);
     expect(e).toBeInstanceOf(ShareNetworkError);
     expect(String(e.message)).not.toContain(TOKEN);
     const g = jest.fn().mockResolvedValue(ok({ code: "bad_request", message: `no such token ${TOKEN}` }, 400));
-    const e2 = await mkClient(g).document().catch((x) => x);
+    const e2 = await mkClient(g)
+      .document()
+      .catch((x) => x);
     expect(JSON.stringify(e2.body)).not.toContain(TOKEN);
   });
   it("test_fr_a3_revoked_token_is_distinct_from_other_401", async () => {
     const f = jest.fn().mockResolvedValue(ok({ code: "token_revoked", message: "x" }, 401));
     await expect(mkClient(f).verify()).rejects.toBeInstanceOf(TokenRevokedError);
     const g = jest.fn().mockResolvedValue(ok({ code: "unauthorized", message: "x" }, 401));
-    const e = await mkClient(g).verify().catch((x) => x);
+    const e = await mkClient(g)
+      .verify()
+      .catch((x) => x);
     expect(e).toBeInstanceOf(ShareHttpError);
     expect(e).not.toBeInstanceOf(TokenRevokedError);
     expect(e.code).toBe("unauthorized");
