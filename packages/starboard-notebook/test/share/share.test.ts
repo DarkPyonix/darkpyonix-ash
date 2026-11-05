@@ -4,6 +4,7 @@ import {
   parseCapabilities,
   parseShareLink,
   stripTokenFromLocation,
+  mayInitServiceWorker,
   ShareClient,
   ShareHttpError,
   ShareForbiddenError,
@@ -472,5 +473,17 @@ describe("FR-A3 revoked share state", () => {
     });
     await c.interrupt().catch(() => undefined);
     expect(seen).toHaveBeenCalledTimes(1); // no socket, no polling: the REST answer is enough
+  });
+});
+
+describe("FR-A2 share page and the service worker", () => {
+  it("test_fr_a2_share_page_never_registers_the_reloading_service_worker", () => {
+    expect(mayInitServiceWorker(undefined, `https://ash.test/?manager=http://m:1&kernel=k1#${TOKEN}`)).toBe(false);
+    expect(mayInitServiceWorker(true, `https://x.test/s/${SID}#${TOKEN}`)).toBe(false);
+  });
+  it("test_fr_a2_plain_ash_keeps_its_service_worker_behaviour", () => {
+    expect(mayInitServiceWorker(undefined, "https://ash.test/index.html#anchor")).toBe(true);
+    expect(mayInitServiceWorker(true, "https://ash.test/")).toBe(true);
+    expect(mayInitServiceWorker(false, "https://ash.test/")).toBe(false);
   });
 });
