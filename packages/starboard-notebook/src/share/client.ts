@@ -3,15 +3,53 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Share client: REST and WebSocket calls exactly as in darkpyonix docs/api/manager.openapi.yaml
- * and PROTOCOL section 5. Never logs or stringifies the token.
+ * Share client: REST and WebSocket calls as in darkpyonix docs/api/manager.openapi.yaml and
+ * PROTOCOL section 5. Errors and logs never contain the token (it is redacted from messages and
+ * bodies, because the verify path and the WebSocket query carry it).
+ *
+ * Gating: once the capability set is known (after `verify()` or from the options), calls that
+ * need a missing capability fail locally with `ShareForbiddenError` and send nothing. The server
+ * remains the authority (INTENT D5); this only avoids pointless requests.
  */
 
 import { Capability, parseCapabilities } from "./capabilities";
 
+export const CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
+/** A fresh client id matching the server rule `^[A-Za-z0-9_-]{8,64}$`. */
+export function generateClientId(): string {
+  const bytes = new Uint8Array(12);
+  const c = (globalThis as any).crypto;
+  // The id is a label, not a secret: fall back to Math.random where Web Crypto is missing.
+  if (c?.getRandomValues) c.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return "ash_" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export class ShareHttpError extends Error {
+  /** Server error code (`{code, message}` body), e.g. `token_revoked`, `forbidden`. */
+  code?: string;
   constructor(public status: number, public body: unknown) {
     super(`HTTP ${status}`);
+    const c = (body as any)?.code;
+    if (typeof c === "string") this.code = c;
+  }
+}
+
+/** 401 `token_revoked`, or a verify answer with `blacklisted: true`. */
+export class TokenRevokedError extends ShareHttpError {
+  constructor(body: unknown) {
+    super(401, body);
+    this.code = "token_revoked";
+    this.message = "공유가 폐기되었습니다";
+  }
+}
+
+export class ShareNetworkError extends Error {}
+
+export class ShareForbiddenError extends Error {
+  constructor(public capability: Capability) {
+    super(`missing capability: ${capability}`);
   }
 }
 
@@ -19,8 +57,10 @@ export interface ShareClientOptions {
   managerUrl: string;
   kernelId: string;
   token: string;
-  /** Sent as X-DarkPyonix-Client and as `client_id` on the WebSocket. */
-  clientId: string;
+  /** Must match ^[A-Za-z0-9_-]{8,64}$; defaults to a generated id. */
+  clientId?: string;
+  /** If known up front; otherwise set by `verify()`. */
+  capabilities?: Iterable<Capability>;
   fetchImpl?: typeof fetch;
   webSocketImpl?: typeof WebSocket;
 }
@@ -30,109 +70,207 @@ export interface WsMessage {
   [k: string]: unknown;
 }
 
+export interface SocketCloseInfo {
+  code: number;
+  reason: string;
+  wasClean: boolean;
+  /** True if the socket never reached OPEN (upgrade refused: browsers hide 401/403/400). */
+  neverOpened: boolean;
+}
+
+export interface SocketHandlers {
+  onMessage: (m: WsMessage) => void;
+  onOpen?: () => void;
+  onError?: () => void;
+  onClose?: (info: SocketCloseInfo) => void;
+}
+
 export class ShareClient {
+  readonly clientId: string;
   private base: string;
   private fetchImpl: typeof fetch;
   private wsImpl?: typeof WebSocket;
+  private caps?: Set<Capability>;
 
   constructor(private opts: ShareClientOptions) {
+    this.clientId = opts.clientId ?? generateClientId();
+    if (!CLIENT_ID_RE.test(this.clientId)) throw new Error("clientId must match ^[A-Za-z0-9_-]{8,64}$");
     this.base = `${opts.managerUrl.replace(/\/+$/, "")}/api/kernels/${encodeURIComponent(opts.kernelId)}`;
     this.fetchImpl = opts.fetchImpl ?? ((...a) => fetch(...a));
     this.wsImpl = opts.webSocketImpl ?? (typeof WebSocket !== "undefined" ? WebSocket : undefined);
+    if (opts.capabilities) this.caps = new Set(opts.capabilities);
+  }
+
+  get capabilities(): ReadonlySet<Capability> | undefined {
+    return this.caps;
+  }
+
+  private redact(s: string): string {
+    const t = this.opts.token;
+    return t ? s.split(t).join("***").split(encodeURIComponent(t)).join("***") : s;
+  }
+
+  private redactBody(b: unknown): unknown {
+    if (b === null || b === undefined) return b;
+    try {
+      return JSON.parse(this.redact(JSON.stringify(b)));
+    } catch {
+      return null;
+    }
+  }
+
+  private need(c: Capability) {
+    if (this.caps && !this.caps.has(c)) throw new ShareForbiddenError(c);
   }
 
   async call(method: string, path: string, body?: unknown): Promise<any> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.opts.token}`,
-      "X-DarkPyonix-Client": this.opts.clientId,
+      "X-DarkPyonix-Client": this.clientId,
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    const resp = await this.fetchImpl(`${this.base}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    let resp: Response;
+    try {
+      resp = await this.fetchImpl(`${this.base}${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    } catch (e) {
+      throw new ShareNetworkError(this.redact(String((e as Error)?.message ?? e)));
+    }
     let parsed: unknown = null;
     try {
-      parsed = await resp.json();
+      parsed = this.redactBody(await resp.json());
     } catch {
       /* empty body */
     }
-    if (!resp.ok) throw new ShareHttpError(resp.status, parsed);
+    if (!resp.ok) {
+      if (resp.status === 401 && (parsed as any)?.code === "token_revoked") throw new TokenRevokedError(parsed);
+      throw new ShareHttpError(resp.status, parsed);
+    }
     return parsed;
   }
 
-  /** GET /api/kernels/{id}/tokens/{token}/verify: the token's capability set. */
+  /** GET /api/kernels/{id}/tokens/{token}/verify: the token's capability set (stored for gating). */
   async verify(): Promise<Set<Capability>> {
     const r = await this.call("GET", `/tokens/${encodeURIComponent(this.opts.token)}/verify`);
-    if (!r || r.valid === false) throw new ShareHttpError(401, r);
-    return parseCapabilities(r.capabilities);
+    if (r?.blacklisted === true) throw new TokenRevokedError(r);
+    if (!r || r.valid !== true) throw new ShareHttpError(401, r);
+    this.caps = parseCapabilities(r.capabilities);
+    return new Set(this.caps);
   }
 
   /** GET .../document (needs read; outputs only with history). */
   document() {
+    this.need("read");
     return this.call("GET", "/document");
   }
   /** GET .../runs (needs history). */
   runs() {
+    this.need("history");
     return this.call("GET", "/runs");
   }
   /** POST .../runs (needs execute). */
   run(body: { mode: string; [k: string]: unknown }) {
+    this.need("execute");
     return this.call("POST", "/runs", body);
   }
   /** PUT .../cells/{id}/lock (needs edit). */
   lockCell(cellId: string) {
+    this.need("edit");
     return this.call("PUT", `/cells/${encodeURIComponent(cellId)}/lock`);
   }
 
-  /** WebSocket URL, as in the real-stack test: /api/ws/kernels/{id}?token=&client_id= (FR-S9). */
+  /** WebSocket URL: /api/ws/kernels/{id}?token=&client_id= (FR-S9; the token is in the query by design). */
   wsUrl(): string {
     const u = new URL(this.opts.managerUrl);
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
     u.pathname = `${u.pathname.replace(/\/+$/, "")}/api/ws/kernels/${encodeURIComponent(this.opts.kernelId)}`;
-    u.search = new URLSearchParams({ token: this.opts.token, client_id: this.opts.clientId }).toString();
+    u.search = new URLSearchParams({ token: this.opts.token, client_id: this.clientId }).toString();
     return u.toString();
   }
 
-  /** Open the sync socket; `onMessage` gets each parsed JSON message. */
-  openSocket(onMessage: (m: WsMessage) => void, onClose?: () => void): ShareSocket {
+  /**
+   * Open the sync socket. Call `verify()` first: a browser hides the upgrade status, so a refused
+   * upgrade (401/403/400) only shows as close with `neverOpened: true`.
+   */
+  openSocket(h: SocketHandlers): ShareSocket {
     if (!this.wsImpl) throw new Error("WebSocket is not available");
     const ws = new this.wsImpl(this.wsUrl());
+    const sock = new ShareSocket(ws, this.opts.kernelId, this.clientId, () => this.caps);
+    ws.onopen = () => {
+      sock.markOpen();
+      h.onOpen?.();
+    };
+    ws.onerror = () => h.onError?.();
     ws.onmessage = (ev: MessageEvent) => {
       try {
         const m = JSON.parse(String(ev.data));
-        if (m && typeof m.type === "string") onMessage(m);
+        if (m && typeof m.type === "string") h.onMessage(m);
       } catch {
         /* ignore non-JSON frames */
       }
     };
-    ws.onclose = () => onClose?.();
-    return new ShareSocket(ws, this.opts.kernelId, this.opts.clientId);
+    ws.onclose = (ev: CloseEvent) =>
+      h.onClose?.({
+        code: ev?.code ?? 1006,
+        reason: this.redact(ev?.reason ?? ""),
+        wasClean: !!ev?.wasClean,
+        neverOpened: !sock.opened,
+      });
+    return sock;
   }
 }
 
 export class ShareSocket {
-  constructor(private ws: WebSocket, private kernelId: string, private clientId: string) {}
+  opened = false;
+  private queue: string[] = [];
+  constructor(
+    private ws: WebSocket,
+    private kernelId: string,
+    private clientId: string,
+    private caps: () => ReadonlySet<Capability> | undefined
+  ) {}
+
+  markOpen() {
+    this.opened = true;
+    for (const s of this.queue.splice(0)) this.ws.send(s);
+  }
+
+  private need(c: Capability) {
+    const caps = this.caps();
+    if (caps && !caps.has(c)) throw new ShareForbiddenError(c);
+  }
+
+  /** Browsers throw on send before OPEN, so messages wait in a queue until it opens. */
   private send(m: WsMessage) {
-    this.ws.send(JSON.stringify(m));
+    const s = JSON.stringify(m);
+    if (this.opened) this.ws.send(s);
+    else this.queue.push(s);
   }
   requestCode() {
+    this.need("read");
     this.send({ type: "request_code", kernel_id: this.kernelId });
   }
   requestHistory() {
+    this.need("history");
     this.send({ type: "request_history", kernel_id: this.kernelId });
   }
   requestLocks() {
+    this.need("read");
     this.send({ type: "request_locks", kernel_id: this.kernelId });
   }
   startTyping(cellId: string) {
+    this.need("edit");
     this.send({ type: "start_typing", cell_id: cellId, user_id: this.clientId });
   }
   cellFocus(cellId: string) {
+    this.need("read");
     this.send({ type: "cell_focus", cell_id: cellId, user_id: this.clientId });
   }
   cellBlur(cellId: string) {
+    this.need("read");
     this.send({ type: "cell_blur", cell_id: cellId });
   }
   close() {

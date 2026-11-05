@@ -6,6 +6,11 @@ import {
   stripTokenFromLocation,
   ShareClient,
   ShareHttpError,
+  ShareForbiddenError,
+  ShareNetworkError,
+  TokenRevokedError,
+  generateClientId,
+  CLIENT_ID_RE,
 } from "../../src/share";
 
 const TOKEN = "tok-not-a-real-secret";
@@ -56,7 +61,7 @@ function mkClient(fetchImpl: any, ws?: any) {
     managerUrl: "http://127.0.0.1:8765/",
     kernelId: "k1",
     token: TOKEN,
-    clientId: "ash-1",
+    clientId: "ash_test_01",
     fetchImpl,
     webSocketImpl: ws,
   });
@@ -70,7 +75,7 @@ describe("FR-A3 REST client", () => {
     const [url, init] = f.mock.calls[0];
     expect(url).toBe("http://127.0.0.1:8765/api/kernels/k1/document");
     expect(init.headers.Authorization).toBe(`Bearer ${TOKEN}`);
-    expect(init.headers["X-DarkPyonix-Client"]).toBe("ash-1");
+    expect(init.headers["X-DarkPyonix-Client"]).toBe("ash_test_01");
   });
   it("test_fr_a3_verify_returns_the_capability_set", async () => {
     const f = jest.fn().mockResolvedValue(ok({ valid: true, kernel_id: "k1", capabilities: ["read", "history"] }));
@@ -84,10 +89,43 @@ describe("FR-A3 REST client", () => {
     await expect(mkClient(f).runs()).rejects.toMatchObject({ status: 403 });
     await expect(mkClient(f).lockCell("c1")).rejects.toBeInstanceOf(ShareHttpError);
   });
-  it("test_fr_a3_error_message_never_contains_the_token", async () => {
-    const f = jest.fn().mockResolvedValue(ok({}, 401));
-    const e = await mkClient(f).document().catch((x) => x);
+  it("test_fr_a3_network_error_and_body_never_contain_the_token", async () => {
+    const f = jest.fn().mockRejectedValue(new Error(`failed to fetch http://m/tokens/${TOKEN}/verify`));
+    const e = await mkClient(f).verify().catch((x) => x);
+    expect(e).toBeInstanceOf(ShareNetworkError);
     expect(String(e.message)).not.toContain(TOKEN);
+    const g = jest.fn().mockResolvedValue(ok({ code: "bad_request", message: `no such token ${TOKEN}` }, 400));
+    const e2 = await mkClient(g).document().catch((x) => x);
+    expect(JSON.stringify(e2.body)).not.toContain(TOKEN);
+  });
+  it("test_fr_a3_revoked_token_is_distinct_from_other_401", async () => {
+    const f = jest.fn().mockResolvedValue(ok({ code: "token_revoked", message: "x" }, 401));
+    await expect(mkClient(f).verify()).rejects.toBeInstanceOf(TokenRevokedError);
+    const g = jest.fn().mockResolvedValue(ok({ code: "unauthorized", message: "x" }, 401));
+    const e = await mkClient(g).verify().catch((x) => x);
+    expect(e).toBeInstanceOf(ShareHttpError);
+    expect(e).not.toBeInstanceOf(TokenRevokedError);
+    expect(e.code).toBe("unauthorized");
+  });
+  it("test_fr_a3_verify_blacklisted_is_revoked", async () => {
+    const f = jest.fn().mockResolvedValue(ok({ valid: true, blacklisted: true, capabilities: ["read"] }));
+    await expect(mkClient(f).verify()).rejects.toBeInstanceOf(TokenRevokedError);
+  });
+  it("test_fr_a3_client_does_not_send_what_the_capabilities_forbid", async () => {
+    const f = jest.fn().mockResolvedValue(ok({ valid: true, blacklisted: false, capabilities: ["read", "history"] }));
+    const c = mkClient(f);
+    await c.verify();
+    f.mockClear();
+    expect(() => c.run({ mode: "all" })).toThrow(ShareForbiddenError);
+    expect(() => c.lockCell("c1")).toThrow(ShareForbiddenError);
+    expect(f).not.toHaveBeenCalled();
+    f.mockResolvedValue(ok({ cells: [] }));
+    await c.document();
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+  it("test_fr_a3_client_id_follows_the_server_rule", () => {
+    expect(CLIENT_ID_RE.test(generateClientId())).toBe(true);
+    expect(() => new ShareClient({ managerUrl: "http://m", kernelId: "k", token: TOKEN, clientId: "ash-1" })).toThrow();
   });
   it("test_fr_a3_run_posts_mode_all", async () => {
     const f = jest.fn().mockResolvedValue(ok({}, 202));
@@ -100,31 +138,82 @@ describe("FR-A3 REST client", () => {
 class FakeWs {
   static last: FakeWs;
   sent: string[] = [];
+  onopen: any;
+  onerror: any;
   onmessage: any;
   onclose: any;
+  open = false;
   constructor(public url: string) {
     FakeWs.last = this;
   }
   send(s: string) {
+    if (!this.open) throw new Error("InvalidStateError");
     this.sent.push(s);
   }
   close() {}
+  doOpen() {
+    this.open = true;
+    this.onopen?.();
+  }
 }
+
+const sockOpen = (caps?: string[]) => {
+  const got: any[] = [];
+  const closes: any[] = [];
+  const c = new ShareClient({
+    managerUrl: "http://127.0.0.1:8765/",
+    kernelId: "k1",
+    token: TOKEN,
+    clientId: "ash_test_01",
+    capabilities: caps as any,
+    fetchImpl: jest.fn(),
+    webSocketImpl: FakeWs as any,
+  });
+  const s = c.openSocket({ onMessage: (m) => got.push(m), onClose: (i) => closes.push(i) });
+  return { s, got, closes };
+};
 
 describe("FR-S9 WebSocket client", () => {
   it("test_fr_s9_ws_url_matches_the_api", () => {
-    const c = mkClient(jest.fn(), FakeWs);
-    expect(c.wsUrl()).toBe(`ws://127.0.0.1:8765/api/ws/kernels/k1?token=${TOKEN}&client_id=ash-1`);
+    expect(mkClient(jest.fn(), FakeWs).wsUrl()).toBe(
+      `ws://127.0.0.1:8765/api/ws/kernels/k1?token=${TOKEN}&client_id=ash_test_01`
+    );
   });
   it("test_fr_s9_ws_messages_and_replies", () => {
-    const got: any[] = [];
-    const s = mkClient(jest.fn(), FakeWs).openSocket((m) => got.push(m));
+    const { s, got } = sockOpen();
+    FakeWs.last.doOpen();
     s.requestHistory();
     s.startTyping("c1");
     expect(JSON.parse(FakeWs.last.sent[0])).toEqual({ type: "request_history", kernel_id: "k1" });
-    expect(JSON.parse(FakeWs.last.sent[1])).toEqual({ type: "start_typing", cell_id: "c1", user_id: "ash-1" });
+    expect(JSON.parse(FakeWs.last.sent[1])).toEqual({ type: "start_typing", cell_id: "c1", user_id: "ash_test_01" });
     FakeWs.last.onmessage({ data: JSON.stringify({ type: "error", error: "INSUFFICIENT_PERMISSION" }) });
     FakeWs.last.onmessage({ data: "garbage" });
     expect(got).toEqual([{ type: "error", error: "INSUFFICIENT_PERMISSION" }]);
+  });
+  it("test_fr_s9_send_before_open_is_queued_in_order", () => {
+    const { s } = sockOpen();
+    s.requestCode();
+    s.requestLocks();
+    expect(FakeWs.last.sent).toEqual([]);
+    FakeWs.last.doOpen();
+    expect(FakeWs.last.sent.map((x) => JSON.parse(x).type)).toEqual(["request_code", "request_locks"]);
+  });
+  it("test_fr_s9_refused_upgrade_is_reported_as_never_opened", () => {
+    const { closes } = sockOpen();
+    FakeWs.last.onclose({ code: 1006, reason: "", wasClean: false });
+    expect(closes).toEqual([{ code: 1006, reason: "", wasClean: false, neverOpened: true }]);
+  });
+  it("test_fr_s9_close_after_open_carries_code_and_redacted_reason", () => {
+    const { closes } = sockOpen();
+    FakeWs.last.doOpen();
+    FakeWs.last.onclose({ code: 1008, reason: `revoked ${TOKEN}`, wasClean: true });
+    expect(closes[0]).toMatchObject({ code: 1008, neverOpened: false, wasClean: true });
+    expect(closes[0].reason).not.toContain(TOKEN);
+  });
+  it("test_fr_s9_read_only_socket_does_not_send_start_typing", () => {
+    const { s } = sockOpen(["read", "history"]);
+    FakeWs.last.doOpen();
+    expect(() => s.startTyping("c1")).toThrow(ShareForbiddenError);
+    expect(FakeWs.last.sent).toEqual([]);
   });
 });
