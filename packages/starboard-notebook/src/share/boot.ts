@@ -5,6 +5,16 @@
 import { Runtime } from "../types";
 import { documentToCells, connectShare, gateControls, ShareConnectError, ShareSession } from "./page";
 import { parseShareLink } from "./parse";
+import { outputsToElement } from "./outputs";
+import { ShareWatch } from "./watch";
+
+/** Show `outputs` under the cell (a `.share-output` child of the cell element, replaced each time). */
+function showOutputs(rt: Runtime, cellId: string, outputs: unknown) {
+  const cellEl = rt.dom.getCellById(cellId);
+  if (!cellEl) return;
+  cellEl.querySelector(":scope > .share-output")?.remove();
+  cellEl.append(outputsToElement(document, outputs));
+}
 
 /**
  * Called from setupRuntime. If the page URL is a share link (token in `#` or `?token=`), the
@@ -34,6 +44,29 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
       rt.content.cells.push(...(documentToCells(session.cells) as any));
       rt.dom.notebook.requestUpdate();
       showStatus(session.banner, false);
+
+      if (!session.abilities.canSeeOutputs) return;
+      rt.dom.notebook.updateComplete.then(() => {
+        for (const c of session.cells) showOutputs(rt, c.cell_id, (c as any).outputs ?? []);
+      });
+      const watch = new ShareWatch(session.client, {
+        onOutputs: (id, outs) => showOutputs(rt, id, outs),
+        onState: (st) => showStatus(`${session.banner}${st === "reconnecting" ? " (다시 연결하는 중...)" : ""}`, false),
+        onEnd: (why) => {
+          rt.controls.runCell = () => false;
+          rt.controls.runAllCells = async () => false;
+          showStatus(
+            why === "revoked"
+              ? "공유가 폐기되었습니다"
+              : why === "unauthorized"
+              ? "공유 토큰이 더 이상 유효하지 않습니다"
+              : "매니저와 연결이 끊겼습니다. 페이지를 다시 불러오세요",
+            true
+          );
+        },
+      });
+      watch.start();
+      window.addEventListener("pagehide", () => watch.stop(), { once: true });
     })
     .catch((e) => {
       showStatus(e instanceof ShareConnectError ? e.message : "공유에 연결하지 못했습니다", true);
