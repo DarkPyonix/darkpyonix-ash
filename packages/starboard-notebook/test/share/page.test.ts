@@ -42,9 +42,13 @@ describe("FR-A2 share page", () => {
     expect(e.message).toContain("매니저");
   });
   it("test_fr_a2_revoked_and_unauthorized_are_distinct", async () => {
-    const r = await connectShare(deps({ "/verify": ok({ code: "token_revoked" }, 401) }).d).catch((x: any) => x);
+    const r = await connectShare(
+      deps({ "/verify": ok({ error: { code: "token_revoked", message: "x" } }, 401) }).d
+    ).catch((x: any) => x);
     expect(r.failure).toBe("revoked");
-    const u = await connectShare(deps({ "/verify": ok({ code: "unauthorized" }, 401) }).d).catch((x: any) => x);
+    const u = await connectShare(
+      deps({ "/verify": ok({ error: { code: "unauthorized", message: "x" } }, 401) }).d
+    ).catch((x: any) => x);
     expect(u.failure).toBe("unauthorized");
     const n = await connectShare(deps({}).d).catch((x: any) => x);
     expect(n.failure).toBe("not_found");

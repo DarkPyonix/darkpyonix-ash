@@ -95,6 +95,7 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
         editor = new ShareEditor(session.client, doc, {
           onError: err,
           onChange: applyChange,
+          onSaved: () => undefined, // our own save only bumps the version: the editor keeps focus and cursor
           onConflict: (id) => {
             // Show the server's version of the cell that was edited elsewhere first.
             session.client
@@ -113,7 +114,7 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
               .catch(() => undefined);
           },
         });
-        window.addEventListener("pagehide", () => void editor?.dispose(), { once: true });
+        window.addEventListener("pagehide", () => void editor?.dispose(true), { once: true });
       }
       gateControls(
         rt.controls as any,
@@ -156,6 +157,7 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
           }
           rt.controls.runAllCells = async () => false;
           rt.dom.notebook.shareInterrupt = undefined;
+          void editor?.dispose(); // free locks and stop retries; errors are swallowed
           showStatus(
             why === "revoked"
               ? "공유가 폐기되었습니다"

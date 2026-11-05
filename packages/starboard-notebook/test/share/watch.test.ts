@@ -189,7 +189,7 @@ describe("FR-A6 reconnect backoff", () => {
 
 describe("FR-A6 revoked share detection", () => {
   it("test_fr_a6_close_then_token_revoked_ends_the_watch", async () => {
-    const { w, ends, timers } = setup(() => ok({ code: "token_revoked" }, 401));
+    const { w, ends, timers } = setup(() => ok({ error: { code: "token_revoked", message: "x" } }, 401));
     w.start();
     FakeWs.all[0].doOpen();
     FakeWs.all[0].onclose({ code: 1000, reason: "", wasClean: true });
@@ -221,7 +221,7 @@ describe("FR-A6 revoked share detection", () => {
     expect(ends).toEqual(["lost"]);
   });
   it("test_fr_a6_stop_does_not_report_an_end", async () => {
-    const { w, ends } = setup(() => ok({ code: "token_revoked" }, 401));
+    const { w, ends } = setup(() => ok({ error: { code: "token_revoked", message: "x" } }, 401));
     w.start();
     w.stop();
     FakeWs.all[0].onclose({ code: 1000, reason: "", wasClean: true });
