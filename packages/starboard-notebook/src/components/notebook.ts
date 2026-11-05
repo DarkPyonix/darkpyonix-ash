@@ -47,6 +47,13 @@ export class StarboardNotebookElement extends LitElement {
 
   public initialRunStarted = false;
 
+  @property({ attribute: false })
+  public shareStatus?: { text: string; isError: boolean };
+
+  setShareStatus(text: string, isError: boolean) {
+    this.shareStatus = { text, isError };
+  }
+
   connectedCallback() {
     super.connectedCallback();
     this.runtime = setupRuntime(this);
@@ -174,6 +181,15 @@ export class StarboardNotebookElement extends LitElement {
 
   render() {
     return html`
+      ${this.shareStatus
+        ? html`<div
+            class="alert ${this.shareStatus.isError ? "alert-danger" : "alert-info"} m-2 py-1 px-2"
+            role="status"
+            data-share-status
+          >
+            ${this.shareStatus.text}
+          </div>`
+        : ""}
       <main class="cells-container"></main>
       <footer class="starboard-notebook-footer line-grid">
         <div class="starboard-notebook-footer-content d-flex align-items-center">
