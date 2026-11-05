@@ -3,9 +3,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /**
- * Render nbformat 4 outputs (as served by the manager, SPEC FR-R4) to DOM, safely: everything is
- * text or a data: image. `text/html` and scripts from a shared kernel are never injected.
+ * Render nbformat 4 outputs (as served by the manager, SPEC FR-R4) to DOM, safely: text, data:
+ * images, and `text/html` only inside the sandboxed frame of html.ts. Nothing from a shared kernel
+ * is ever inserted into the page itself.
  */
+
+import { htmlOutputBlock, MAX_HTML_BYTES } from "./html";
 
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
@@ -47,7 +50,9 @@ export function outputToElement(doc: Document, out: any): HTMLElement | null {
       el.className = "share-output-image";
       return el;
     }
+    const html = text(data["text/html"]);
     const plain = text(data["text/plain"]);
+    if (html && html.length <= MAX_HTML_BYTES) return htmlOutputBlock(doc, html, stripAnsi(plain));
     if (plain) {
       const pre = doc.createElement("pre");
       pre.className = "share-output-text";

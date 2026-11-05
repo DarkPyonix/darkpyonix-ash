@@ -223,6 +223,12 @@ describe("FR-A6 revoked share detection", () => {
 });
 
 class El {
+  attrs: Record<string, string> = {};
+  setAttribute(k: string, v: string) {
+    this.attrs[k] = v;
+  }
+  addEventListener() {}
+  replaceChildren() {}
   children: El[] = [];
   className = "";
   textContent = "";
@@ -243,13 +249,14 @@ describe("FR-R4 output rendering", () => {
     expect(box.children.map((c: El) => c.textContent)).toEqual(["a\nb", "boom"]);
     expect(stripAnsi("\u001b[1mx\u001b[0m")).toBe("x");
   });
-  it("test_fr_r4_html_output_is_never_injected", () => {
+  it("test_fr_r4_html_output_is_not_rendered_by_default", () => {
     const box: any = outputsToElement(fakeDoc, [
       { output_type: "display_data", data: { "text/html": "<script>alert(1)</script>", "text/plain": "plain" } },
-      { output_type: "display_data", data: { "text/html": "<b>only html</b>" } },
     ]);
-    expect(box.children.length).toBe(1);
-    expect(box.children[0].textContent).toBe("plain");
+    const all = JSON.stringify(box);
+    expect(all).not.toContain("iframe");
+    expect(all).not.toContain("<script>");
+    expect(JSON.stringify(box)).toContain("plain");
   });
   it("test_fr_r4_error_without_fields_has_no_undefined_text", () => {
     const box: any = outputsToElement(fakeDoc, [{ output_type: "error" }, { output_type: "error", ename: "E" }]);
