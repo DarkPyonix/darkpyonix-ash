@@ -13,6 +13,7 @@
  */
 
 import { ShareClient, ShareHttpError } from "./client";
+import { utf8Length } from "./html";
 import { DocChange, DocCell, ShareDoc } from "./doc";
 
 export interface EditorOptions {
@@ -230,41 +231,70 @@ export class ShareEditor {
     }
   }
 
+  /** True while an edit has not reached the server (a page that closes now would lose it). */
+  hasUnsaved() {
+    return this.pending.size > 0;
+  }
+
+  private disposing?: Promise<void>;
+
   /**
-   * Send what is pending and release every lock (page hide, revoked share). With `keepalive` the
-   * requests survive the page being closed: a locked cell is saved and unlocked in ONE request
-   * (`DELETE .../lock` with the final source), the cheapest thing that can finish in time.
-   * Errors are swallowed: nobody is left to read them.
+   * Send what is pending and release every lock (page hide, revoked share). Safe to call twice:
+   * the second call gets the first call's promise. Pending sends in the queue finish first.
+   *
+   * With `keepalive` (page hide) only requests that can still finish are made: a locked cell is
+   * saved and unlocked in ONE keepalive request (`DELETE .../lock` with the final source). A
+   * keepalive body is limited to about 64 KB, so a larger source is not sent (only the lock is
+   * released), and an edit on a cell that is not locked yet is not started (it would have to wait
+   * for a lock request first). Both are reported with `onError` in Korean, never dropped silently.
    */
-  async dispose(keepalive = false) {
-    const ids = new Set([...this.pending.keys(), ...this.locked]);
+  dispose(keepalive = false): Promise<void> {
+    if (this.disposing) return this.disposing;
+    this.closed = true; // first: no new edits, retries or timers from here on
     for (const t of [...this.timers.values(), ...this.idle.values(), ...this.retryTimers.values()]) this.clear(t);
     this.timers.clear();
     this.idle.clear();
     this.retryTimers.clear();
-    await Promise.all(
-      [...ids].map(async (id) => {
-        const source = this.pending.get(id);
-        const base = this.base.get(id);
-        try {
-          if (this.locked.has(id)) {
-            this.locked.delete(id);
-            await this.client.unlockCell(
-              id,
-              source !== undefined && base !== undefined ? { source, base_version: base } : undefined,
-              keepalive
-            );
-          } else if (source !== undefined && base !== undefined) {
-            await this.client.lockCell(id);
-            await this.client.unlockCell(id, { source, base_version: base }, keepalive);
+    this.disposing = (async () => {
+      await Promise.all([...this.chain.values()].map((p) => p.catch(() => undefined)));
+      const ids = new Set([...this.pending.keys(), ...this.locked]);
+      const lost: string[] = [];
+      await Promise.all(
+        [...ids].map(async (id) => {
+          const source = this.pending.get(id);
+          const base = this.base.get(id);
+          const hasEdit = source !== undefined && base !== undefined;
+          try {
+            if (this.locked.has(id)) {
+              this.locked.delete(id);
+              const tooBig = keepalive && hasEdit && utf8Length(source!) > KEEPALIVE_SOURCE_LIMIT;
+              if (tooBig) lost.push(id);
+              await this.client.unlockCell(
+                id,
+                hasEdit && !tooBig ? { source: source!, base_version: base! } : undefined,
+                keepalive
+              );
+            } else if (hasEdit) {
+              if (keepalive) {
+                lost.push(id);
+              } else {
+                await this.client.lockCell(id);
+                await this.client.unlockCell(id, { source: source!, base_version: base! });
+              }
+            }
+          } catch {
+            if (hasEdit) lost.push(id);
           }
-        } catch {
-          /* best effort */
-        }
-        this.pending.delete(id);
-        this.base.delete(id);
-      })
-    );
-    this.closed = true;
+          this.pending.delete(id);
+          this.base.delete(id);
+        })
+      );
+      if (lost.length) this.h.onError(UNSAVED_MESSAGE);
+    })();
+    return this.disposing;
   }
 }
+
+/** Keepalive request bodies are limited to about 64 KB by browsers; stay below with headroom. */
+export const KEEPALIVE_SOURCE_LIMIT = 60_000;
+export const UNSAVED_MESSAGE = "저장하지 못한 변경이 있습니다. 공유 링크로 다시 접속해 확인하세요";

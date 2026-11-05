@@ -1,5 +1,7 @@
 import {
   errorCode,
+  KEEPALIVE_SOURCE_LIMIT,
+  UNSAVED_MESSAGE,
   ShareClient,
   ShareDoc,
   ShareEditor,
@@ -332,6 +334,99 @@ describe("FR-S3 edit safety", () => {
     await editor.dispose();
     expect(calls.map((c) => c[0] + " " + c[1])).toEqual(["DELETE /cells/a/lock"]);
     expect(errors).toEqual([]);
+  });
+  it("test_fr_s3_oversized_source_is_not_sent_with_keepalive_but_the_lock_is_released_and_user_is_warned", async () => {
+    const { editor, calls, inits, errors } = setupEditor((m) => (m === "PATCH" ? ok(cell("a", 2, "k")) : ok({})));
+    editor.localChange("a", "first");
+    await editor.flush("a");
+    editor.localChange("a", "x".repeat(KEEPALIVE_SOURCE_LIMIT + 1));
+    calls.length = 0;
+    inits.length = 0;
+    await editor.dispose(true);
+    expect(calls.map((c) => [c[0], c[1]])).toEqual([["DELETE", "/cells/a/lock"]]);
+    expect(calls[0][2]).toBeUndefined(); // no body: the lock is released, the big source is not sent
+    expect(inits[0].keepalive).toBe(true);
+    expect(errors).toEqual([UNSAVED_MESSAGE]);
+  });
+  it("test_fr_s3_source_at_the_limit_is_still_sent_with_keepalive", async () => {
+    const { editor, calls, errors } = setupEditor((m) => (m === "PATCH" ? ok(cell("a", 2, "k")) : ok({})));
+    editor.localChange("a", "first");
+    await editor.flush("a");
+    editor.localChange("a", "y".repeat(KEEPALIVE_SOURCE_LIMIT));
+    calls.length = 0;
+    await editor.dispose(true);
+    expect(calls[0][2].source.length).toBe(KEEPALIVE_SOURCE_LIMIT);
+    expect(errors).toEqual([]);
+  });
+  it("test_fr_s3_source_size_limit_counts_utf8_bytes", async () => {
+    const { editor, calls } = setupEditor((m) => (m === "PATCH" ? ok(cell("a", 2, "k")) : ok({})));
+    editor.localChange("a", "first");
+    await editor.flush("a");
+    editor.localChange("a", "한".repeat(25_000)); // 25k characters, 75k bytes
+    calls.length = 0;
+    await editor.dispose(true);
+    expect(calls[0][2]).toBeUndefined();
+  });
+  it("test_fr_s3_pagehide_does_not_start_a_lock_for_an_unlocked_pending_edit", async () => {
+    const { editor, calls, errors } = setupEditor(() => ok({}));
+    editor.localChange("a", "typed but never sent");
+    expect(editor.hasUnsaved()).toBe(true);
+    await editor.dispose(true);
+    expect(calls).toEqual([]); // no lock request that the unloading page could not finish
+    expect(errors).toEqual([UNSAVED_MESSAGE]);
+  });
+  it("test_fr_s3_revoked_dispose_without_keepalive_still_saves_an_unlocked_edit", async () => {
+    const { editor, calls } = setupEditor((m) => (m === "PATCH" ? ok(cell("a", 2, "k")) : ok({})));
+    editor.localChange("a", "typed");
+    await editor.dispose(false);
+    expect(calls.map((c) => c[0] + " " + c[1])).toEqual(["PUT /cells/a/lock", "DELETE /cells/a/lock"]);
+    expect(calls[1][2]).toEqual({ source: "typed", base_version: 1 });
+  });
+  it("test_fr_s3_concurrent_dispose_is_one_dispose", async () => {
+    const { editor, calls, errors } = setupEditor((m) => (m === "PATCH" ? ok(cell("a", 2, "k")) : ok({})));
+    editor.localChange("a", "first");
+    await editor.flush("a");
+    editor.localChange("a", "second");
+    calls.length = 0;
+    const p1 = editor.dispose(true);
+    const p2 = editor.dispose(true);
+    expect(p2).toBe(p1);
+    await Promise.all([p1, p2]);
+    expect(calls.filter((c) => c[0] === "DELETE").length).toBe(1);
+    expect(errors).toEqual([]);
+  });
+  it("test_fr_s3_dispose_waits_for_a_save_in_flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { editor, calls } = setupEditor(async (m) => {
+      if (m === "PATCH") await gate;
+      return m === "PATCH" ? ok(cell("a", 2, "z")) : ok({});
+    });
+    editor.localChange("a", "z");
+    const saving = editor.flush("a");
+    await flushAll();
+    const disposing = editor.dispose(true);
+    release();
+    await Promise.all([saving, disposing]);
+    // the PATCH finished, then the lock was released once, nothing was left pending
+    expect(calls.map((c) => c[0])).toEqual(["PUT", "PATCH", "DELETE"]);
+    expect(editor.hasUnsaved()).toBe(false);
+  });
+  it("test_fr_a6_editor_stops_on_token_revoked_without_retrying", async () => {
+    const { editor, timers, errors, conflicts } = setupEditor((m) =>
+      m === "PATCH" ? ok({ error: { code: "token_revoked", message: "x" } }, 401) : ok({})
+    );
+    editor.localChange("a", "z");
+    await editor.flush("a");
+    expect(editor.hasPending("a")).toBe(false);
+    expect(conflicts).toEqual([]);
+    expect(timers.filter((t) => !t.cleared && t.ms === 2000)).toEqual([]); // no retry
+    expect(errors[0]).toContain("유효하지 않습니다");
+  });
+  it("test_fr_a3_after_dispose", async () => {
+    const { editor } = setupEditor(() => ok({}));
+    await editor.dispose();
+    expect(editor.hasUnsaved()).toBe(false);
   });
   it("test_fr_s3_after_dispose_nothing_is_sent_or_scheduled", async () => {
     const { editor, calls, timers } = setupEditor(() => ok({}));

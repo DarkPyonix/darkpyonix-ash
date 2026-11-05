@@ -115,6 +115,13 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
           },
         });
         window.addEventListener("pagehide", () => void editor?.dispose(true), { once: true });
+        // Leaving with an unsent edit asks the browser to confirm (the edit would be lost).
+        window.addEventListener("beforeunload", (ev) => {
+          if (editor?.hasUnsaved()) {
+            ev.preventDefault();
+            ev.returnValue = false;
+          }
+        });
       }
       gateControls(
         rt.controls as any,
@@ -141,6 +148,15 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
           for (const c of session.cells) put(c.cell_id, (c as any).outputs ?? []);
         });
       }
+      /** Block every operation of the share page (run, edit, interrupt). */
+      const blockAll = () => {
+        const blocked = () => false;
+        for (const k of ["runCell", "insertCell", "removeCell", "moveCell", "moveCellToIndex"] as const) {
+          (rt.controls as any)[k] = blocked;
+        }
+        rt.controls.runAllCells = async () => false;
+        rt.dom.notebook.shareInterrupt = undefined;
+      };
       const watch = new ShareWatch(session.client, {
         onOutputs: (id, outs) => {
           if (session.abilities.canSeeOutputs) put(id, outs);
@@ -151,12 +167,7 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
         },
         onState: (st) => showStatus(`${session.banner}${st === "reconnecting" ? " (다시 연결하는 중...)" : ""}`, false),
         onEnd: (why) => {
-          const blocked = () => false;
-          for (const k of ["runCell", "insertCell", "removeCell", "moveCell", "moveCellToIndex"] as const) {
-            (rt.controls as any)[k] = blocked;
-          }
-          rt.controls.runAllCells = async () => false;
-          rt.dom.notebook.shareInterrupt = undefined;
+          blockAll();
           void editor?.dispose(); // free locks and stop retries; errors are swallowed
           showStatus(
             why === "revoked"
@@ -167,6 +178,13 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
             true
           );
         },
+      });
+      // Restored from the back/forward cache: the socket and editor were closed on pagehide and the
+      // token is no longer in the address bar, so the page cannot reconnect by itself.
+      window.addEventListener("pageshow", (ev) => {
+        if (!ev.persisted) return;
+        blockAll();
+        showStatus("페이지가 이전 상태로 복원되었습니다. 공유 링크로 다시 접속하세요", true);
       });
       watch.start();
       window.addEventListener("pagehide", () => watch.stop(), { once: true });
