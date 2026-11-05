@@ -23,33 +23,74 @@ export interface WatchHandlers {
 
 export interface WatchOptions {
   maxRetries?: number;
+  /** Base delay; attempt n waits base * 2^n, then jitter. Default 1000 (1, 2, 4, 8, 16 s). */
   baseDelayMs?: number;
+  /** Fraction of the delay added or removed at random. Default 0.3. */
+  jitter?: number;
+  /** A socket that stayed open this long counts as healthy and resets the retry count. Default 10000. */
+  stableMs?: number;
   setTimeoutImpl?: (fn: () => void, ms: number) => unknown;
+  clearTimeoutImpl?: (handle: unknown) => void;
+  randomImpl?: () => number;
+  nowImpl?: () => number;
 }
 
 export class ShareWatch {
   private socket?: ShareSocket;
   private stopped = false;
   private retries = 0;
+  private generation = 0;
+  private openedAt: number | undefined;
+  private gotMessage = false;
+  private timer: unknown;
   private partial = new Map<string, unknown[]>();
 
   constructor(private client: ShareClient, private h: WatchHandlers, private o: WatchOptions = {}) {}
 
+  private now() {
+    return (this.o.nowImpl ?? Date.now)();
+  }
+
+  /** Delay before reconnect attempt `n` (0-based): exponential with random jitter. */
+  delayFor(n: number): number {
+    const base = (this.o.baseDelayMs ?? 1000) * 2 ** n;
+    const j = this.o.jitter ?? 0.3;
+    const r = (this.o.randomImpl ?? Math.random)();
+    return Math.max(0, Math.round(base * (1 + (r * 2 - 1) * j)));
+  }
+
   start() {
+    if (this.stopped) return;
+    const gen = ++this.generation;
+    this.gotMessage = false;
     this.h.onState?.(this.retries ? "reconnecting" : "connecting");
     this.socket = this.client.openSocket({
       onOpen: () => {
-        this.retries = 0;
+        if (gen !== this.generation) return;
+        // Not reset here: a socket that opens and closes at once must not restart the backoff.
+        this.openedAt = this.now();
         this.h.onState?.("live");
         if (this.client.capabilities?.has("history")) this.socket?.requestHistory();
       },
-      onMessage: (m) => this.onMessage(m),
-      onClose: (info) => void this.onClose(info),
+      onMessage: (m) => {
+        if (gen !== this.generation) return;
+        this.gotMessage = true;
+        this.retries = 0;
+        this.onMessage(m);
+      },
+      onClose: (info) => {
+        if (gen !== this.generation) return;
+        this.generation++; // a second close event for the same socket is ignored
+        void this.onClose(info);
+      },
     });
   }
 
   stop() {
     this.stopped = true;
+    this.generation++;
+    if (this.timer !== undefined) (this.o.clearTimeoutImpl ?? clearTimeout)(this.timer as any);
+    this.timer = undefined;
     this.socket?.close();
   }
 
@@ -60,6 +101,8 @@ export class ShareWatch {
 
   private async onClose(_info: SocketCloseInfo) {
     if (this.stopped) return;
+    if (this.openedAt !== undefined && this.now() - this.openedAt >= (this.o.stableMs ?? 10000)) this.retries = 0;
+    this.openedAt = undefined;
     try {
       await this.client.verify();
     } catch (e) {
@@ -69,10 +112,12 @@ export class ShareWatch {
       // network failure or 5xx: fall through to retry
     }
     if (this.stopped) return;
-    const max = this.o.maxRetries ?? 5;
-    if (this.retries >= max) return this.end("lost");
-    const delay = (this.o.baseDelayMs ?? 1000) * 2 ** this.retries++;
-    (this.o.setTimeoutImpl ?? setTimeout)(() => !this.stopped && this.start(), delay);
+    if (this.retries >= (this.o.maxRetries ?? 5)) return this.end("lost");
+    const delay = this.delayFor(this.retries++);
+    this.timer = (this.o.setTimeoutImpl ?? setTimeout)(() => {
+      this.timer = undefined;
+      this.start();
+    }, delay);
   }
 
   onMessage(m: WsMessage) {

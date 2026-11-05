@@ -32,7 +32,9 @@ export function outputToElement(doc: Document, out: any): HTMLElement | null {
     const pre = doc.createElement("pre");
     pre.className = "share-output-error";
     const tb =
-      Array.isArray(out.traceback) && out.traceback.length ? out.traceback.join("\n") : `${out.ename}: ${out.evalue}`;
+      Array.isArray(out.traceback) && out.traceback.length
+        ? out.traceback.join("\n")
+        : [out.ename, out.evalue].filter((x) => typeof x === "string" && x).join(": ") || "오류";
     pre.textContent = stripAnsi(tb);
     return pre;
   }

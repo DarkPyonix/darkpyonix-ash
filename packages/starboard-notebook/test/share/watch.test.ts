@@ -1,4 +1,4 @@
-import { ShareClient, ShareWatch, outputsToElement, stripAnsi } from "../../src/share";
+import { ShareClient, ShareWatch, TokenRevokedError, outputsToElement, stripAnsi } from "../../src/share";
 
 const TOKEN = "tok-not-a-real-secret";
 const ok = (body: unknown, status = 200) => ({ ok: status < 400, status, json: async () => body });
@@ -24,7 +24,9 @@ class FakeWs {
   }
 }
 
-function setup(verify: () => any) {
+type Timer = (() => void) & { ms: number; cleared?: boolean };
+
+function setup(verify: () => any, extra: any = {}) {
   FakeWs.all = [];
   const f = jest.fn(async () => verify());
   const client = new ShareClient({
@@ -37,13 +39,25 @@ function setup(verify: () => any) {
   });
   const outs: Array<[string, unknown[]]> = [];
   const ends: string[] = [];
-  const timers: Array<() => void> = [];
+  const timers: Timer[] = [];
+  let now = 0;
+  const clock = { advance: (ms: number) => (now += ms) };
   const w = new ShareWatch(
     client,
     { onOutputs: (id, o) => outs.push([id, o]), onEnd: (e) => ends.push(e) },
-    { setTimeoutImpl: (fn) => timers.push(fn) }
+    {
+      setTimeoutImpl: (fn, ms) => {
+        const t: Timer = Object.assign(() => fn(), { ms });
+        timers.push(t);
+        return t;
+      },
+      clearTimeoutImpl: (t) => ((t as Timer).cleared = true),
+      randomImpl: () => 0.5, // no jitter
+      nowImpl: () => now,
+      ...extra,
+    }
   );
-  return { w, outs, ends, timers, f };
+  return { w, outs, ends, timers, f, clock };
 }
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -76,6 +90,92 @@ describe("FR-S9 live share", () => {
     w.onMessage({ type: "execution_error", cell_id: "c1", error: { ename: "E", evalue: "v", traceback: ["tb"] } });
     const last = outs[outs.length - 1][1] as any[];
     expect(last.map((o) => o.output_type)).toEqual(["stream", "error"]);
+  });
+});
+
+describe("FR-A6 reconnect backoff", () => {
+  const closeAndWait = async (i: number) => {
+    FakeWs.all[i].onclose({ code: 1006, reason: "", wasClean: false });
+    await flush();
+  };
+  const down = () => {
+    throw new Error("down");
+  };
+
+  it("test_fr_a6_backoff_doubles_from_one_second", async () => {
+    const { w, timers } = setup(down, { maxRetries: 10 });
+    w.start();
+    for (let i = 0; i < 5; i++) {
+      await closeAndWait(i);
+      timers[i]();
+    }
+    expect(timers.map((t) => t.ms)).toEqual([1000, 2000, 4000, 8000, 16000]);
+  });
+  it("test_fr_a6_delay_is_jittered_within_bounds", () => {
+    const lo = setup(() => ok({}), { randomImpl: () => 0 }).w;
+    const hi = setup(() => ok({}), { randomImpl: () => 1 }).w;
+    expect(lo.delayFor(2)).toBe(2800); // 4000 * 0.7
+    expect(hi.delayFor(2)).toBe(5200); // 4000 * 1.3
+  });
+  it("test_fr_a6_open_then_immediate_close_does_not_reset_the_backoff", async () => {
+    const { w, timers, clock } = setup(() => ok({ valid: true, capabilities: ["read"] }), { maxRetries: 10 });
+    w.start();
+    for (let i = 0; i < 3; i++) {
+      FakeWs.all[i].doOpen();
+      clock.advance(100); // closes within 100 ms of opening
+      await closeAndWait(i);
+      timers[i]();
+    }
+    expect(timers.map((t) => t.ms)).toEqual([1000, 2000, 4000]);
+  });
+  it("test_fr_a6_stable_socket_resets_the_backoff", async () => {
+    const { w, timers, clock } = setup(() => ok({ valid: true, capabilities: ["read"] }), { maxRetries: 10 });
+    w.start();
+    await closeAndWait(0);
+    timers[0]();
+    await closeAndWait(1);
+    timers[1]();
+    FakeWs.all[2].doOpen();
+    clock.advance(30000);
+    await closeAndWait(2);
+    expect(timers[2].ms).toBe(1000);
+  });
+  it("test_fr_a6_first_message_resets_the_backoff", async () => {
+    const { w, timers } = setup(() => ok({ valid: true, capabilities: ["read"] }), { maxRetries: 10 });
+    w.start();
+    await closeAndWait(0);
+    timers[0]();
+    FakeWs.all[1].doOpen();
+    FakeWs.all[1].onmessage({ data: JSON.stringify({ type: "locks_data", locks: [] }) });
+    await closeAndWait(1);
+    expect(timers[1].ms).toBe(1000);
+  });
+  it("test_fr_a6_stop_cancels_the_pending_reconnect", async () => {
+    const { w, timers } = setup(() => ok({ valid: true, capabilities: ["read"] }));
+    w.start();
+    await closeAndWait(0);
+    expect(timers.length).toBe(1);
+    w.stop();
+    expect(timers[0].cleared).toBe(true);
+    timers[0]();
+    expect(FakeWs.all.length).toBe(1);
+  });
+  it("test_fr_a6_duplicate_close_events_schedule_one_reconnect", async () => {
+    const { w, timers, f } = setup(() => ok({ valid: true, capabilities: ["read"] }));
+    w.start();
+    FakeWs.all[0].onclose({ code: 1006, reason: "", wasClean: false });
+    FakeWs.all[0].onclose({ code: 1006, reason: "", wasClean: false });
+    await flush();
+    expect(timers.length).toBe(1);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+  it("test_fr_a6_plain_error_retries_but_revoked_error_ends", async () => {
+    expect(new TokenRevokedError({})).toBeInstanceOf(Error);
+    const a = setup(down);
+    a.w.start();
+    await closeAndWait(0);
+    expect(a.ends).toEqual([]);
+    expect(a.timers.length).toBe(1);
   });
 });
 
@@ -150,6 +250,10 @@ describe("FR-R4 output rendering", () => {
     ]);
     expect(box.children.length).toBe(1);
     expect(box.children[0].textContent).toBe("plain");
+  });
+  it("test_fr_r4_error_without_fields_has_no_undefined_text", () => {
+    const box: any = outputsToElement(fakeDoc, [{ output_type: "error" }, { output_type: "error", ename: "E" }]);
+    expect(box.children.map((c: El) => c.textContent)).toEqual(["오류", "E"]);
   });
   it("test_fr_r4_png_becomes_a_data_url_image", () => {
     const box: any = outputsToElement(fakeDoc, [{ output_type: "display_data", data: { "image/png": "AAAA\n" } }]);

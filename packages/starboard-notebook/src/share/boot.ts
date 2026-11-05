@@ -66,6 +66,7 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
         },
       });
       watch.start();
+      window.addEventListener("pagehide", () => watch.stop(), { once: true });
     })
     .catch((e) => {
       showStatus(e instanceof ShareConnectError ? e.message : "공유에 연결하지 못했습니다", true);
