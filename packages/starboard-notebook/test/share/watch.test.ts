@@ -75,6 +75,14 @@ describe("FR-S9 live share", () => {
     });
     expect(outs).toEqual([["c1", [{ output_type: "stream" }]]]);
   });
+  it("test_fr_s9_unnamed_kernel_events_are_forwarded", () => {
+    const seen: any[] = [];
+    const { w } = setup(() => ok({}));
+    (w as any).h.onEvent = (t: string, d: any) => seen.push([t, d]);
+    w.onMessage({ type: "event", event: { seq: 4, type: "doc.cell.created", data: { cell: { cell_id: "n" } } } });
+    w.onMessage({ type: "event", event: { nope: true } });
+    expect(seen).toEqual([["doc.cell.created", { cell: { cell_id: "n" } }]]);
+  });
   it("test_fr_s9_execution_events_accumulate_then_final_replaces", () => {
     const { w, outs } = setup(() => ok({}));
     w.onMessage({ type: "execution_started", cell_id: "c1" });

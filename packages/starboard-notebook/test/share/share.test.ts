@@ -68,6 +68,7 @@ function mkClient(fetchImpl: any, ws?: any) {
     kernelId: "k1",
     token: TOKEN,
     clientId: "ash_test_01",
+    capabilities: ["read", "history", "execute", "edit", "manage"],
     fetchImpl,
     webSocketImpl: ws,
   });
@@ -177,13 +178,99 @@ const sockOpen = (caps?: string[]) => {
     kernelId: "k1",
     token: TOKEN,
     clientId: "ash_test_01",
-    capabilities: caps as any,
+    capabilities: (caps ?? ["read", "history", "execute", "edit", "manage"]) as any,
     fetchImpl: jest.fn(),
     webSocketImpl: FakeWs as any,
   });
   const s = c.openSocket({ onMessage: (m) => got.push(m), onClose: (i) => closes.push(i) });
   return { s, got, closes };
 };
+
+describe("FR-A3 default-deny", () => {
+  const bare = (f: any) =>
+    new ShareClient({
+      managerUrl: "http://m:1",
+      kernelId: "k1",
+      token: TOKEN,
+      fetchImpl: f,
+      webSocketImpl: FakeWs as any,
+    });
+  it("test_fr_a3_unverified_client_sends_nothing", () => {
+    const f = jest.fn();
+    const c = bare(f);
+    for (const fn of [
+      () => c.document(),
+      () => c.runs(),
+      () => c.run({ mode: "all" }),
+      () => c.interrupt(),
+      () => c.createCell({}),
+      () => c.updateCell("c1", { base_version: 1, source: "x" }),
+      () => c.deleteCell("c1", 1),
+      () => c.moveCell("c1", 2),
+      () => c.lockCell("c1"),
+      () => c.unlockCell("c1"),
+    ]) {
+      expect(fn).toThrow(ShareForbiddenError);
+    }
+    expect(f).not.toHaveBeenCalled();
+  });
+  it("test_fr_a3_unverified_socket_sends_nothing", () => {
+    const s = bare(jest.fn()).openSocket({ onMessage: () => undefined });
+    FakeWs.last.doOpen();
+    expect(() => s.requestCode()).toThrow(ShareForbiddenError);
+    expect(() => s.startTyping("c1")).toThrow(ShareForbiddenError);
+    expect(FakeWs.last.sent).toEqual([]);
+  });
+  it("test_fr_a3_execute_is_not_edit_and_edit_is_not_execute", async () => {
+    const f = jest.fn().mockResolvedValue(ok({}));
+    const ex = new ShareClient({
+      managerUrl: "http://m:1",
+      kernelId: "k1",
+      token: TOKEN,
+      capabilities: ["read", "execute"],
+      fetchImpl: f,
+    });
+    const ed = new ShareClient({
+      managerUrl: "http://m:1",
+      kernelId: "k1",
+      token: TOKEN,
+      capabilities: ["read", "edit"],
+      fetchImpl: f,
+    });
+    expect(() => ex.createCell({})).toThrow(ShareForbiddenError);
+    expect(() => ex.lockCell("c")).toThrow(ShareForbiddenError);
+    expect(() => ed.interrupt()).toThrow(ShareForbiddenError);
+    expect(() => ed.run({ mode: "all" })).toThrow(ShareForbiddenError);
+    expect(f).not.toHaveBeenCalled();
+    await ex.interrupt();
+    await ed.createCell({ source: "x" });
+    expect(f.mock.calls.map((c: any) => [c[1].method, c[0].replace("http://m:1/api/kernels/k1", "")])).toEqual([
+      ["POST", "/interrupt"],
+      ["POST", "/cells"],
+    ]);
+  });
+  it("test_fr_a3_edit_calls_use_the_documented_paths", async () => {
+    const f = jest.fn().mockResolvedValue(ok({}));
+    const c = new ShareClient({
+      managerUrl: "http://m:1",
+      kernelId: "k1",
+      token: TOKEN,
+      capabilities: ["edit"],
+      fetchImpl: f,
+    });
+    await c.updateCell("c1", { base_version: 3, source: "y" });
+    await c.deleteCell("c1", 4);
+    await c.moveCell("c1", 0);
+    await c.unlockCell("c1");
+    expect(f.mock.calls.map((x: any) => [x[1].method, x[0].replace("http://m:1/api/kernels/k1", "")])).toEqual([
+      ["PATCH", "/cells/c1"],
+      ["DELETE", "/cells/c1?base_version=4"],
+      ["POST", "/cells/c1/move"],
+      ["DELETE", "/cells/c1/lock"],
+    ]);
+    expect(JSON.parse(f.mock.calls[0][1].body)).toEqual({ base_version: 3, source: "y" });
+  });
+});
 
 describe("FR-S9 WebSocket client", () => {
   it("test_fr_s9_ws_url_matches_the_api", () => {

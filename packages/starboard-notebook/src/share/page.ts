@@ -10,6 +10,8 @@
 
 import { abilitiesOf, describeCapabilities, isReadOnly, ShareAbilities } from "./capabilities";
 import { ShareClient, ShareHttpError, TokenRevokedError } from "./client";
+import { ShareEditor } from "./edit";
+import { ShareDoc } from "./doc";
 import { parseShareLink, ShareLink, stripTokenFromLocation } from "./parse";
 
 export type ShareFailure = "no_link" | "missing_target" | "revoked" | "unauthorized" | "not_found" | "network";
@@ -89,12 +91,13 @@ export async function connectShare(deps: PageDeps): Promise<ShareSession | null>
 }
 
 /** Remote cells to notebook cells. Cell ids are the remote `cell_id`s. Outputs are not rendered here. */
-export function documentToCells(cells: RemoteCell[]) {
+export function documentToCells(cells: RemoteCell[], editable = false) {
   return cells.map((c) => ({
     id: c.cell_id,
     cellType: c.type === "markdown" || c.type === "preamble" ? "markdown" : "python",
     textContent: c.source,
-    metadata: { properties: { locked: true as const }, remote: true },
+    // Cells are locked (read-only editors) unless the share has `edit`.
+    metadata: { properties: editable ? {} : { locked: true as const }, remote: true },
   }));
 }
 
@@ -118,7 +121,12 @@ export interface GateableControls {
  * sent to the kernel as a remote run (POST /runs); without it, nothing is sent. Edits are blocked
  * entirely in this version: cell editing over REST is not wired yet, even for `edit` tokens.
  */
-export function gateControls(controls: GateableControls, session: ShareSession, onError: (e: unknown) => void) {
+export function gateControls(
+  controls: GateableControls,
+  session: ShareSession,
+  onError: (e: unknown) => void,
+  editing?: { editor: ShareEditor; doc: ShareDoc }
+) {
   const blocked = () => false;
   for (const k of [
     "insertCell",
@@ -133,6 +141,33 @@ export function gateControls(controls: GateableControls, session: ShareSession, 
     controls[k] = blocked;
   }
   controls.clearAllCells = () => undefined;
+  if (session.abilities.canEdit && editing) {
+    // Cell structure edits go to the kernel (needs `edit`); the UI follows the answer. Type and
+    // property changes, reset and clear stay blocked: the API has no safe equivalent.
+    const { editor, doc } = editing;
+    controls.insertCell = (opts: { data?: { textContent?: string }; position: string; adjacentCellId?: string }) => {
+      const adj = opts.adjacentCellId;
+      void editor.insert({
+        source: opts.data?.textContent ?? "",
+        ...(opts.position === "after" && adj ? { after: adj } : {}),
+        ...(opts.position === "before" && adj ? { before: adj } : {}),
+      });
+      return false;
+    };
+    controls.removeCell = (opts: { id: string }) => {
+      void editor.remove(opts.id);
+      return false;
+    };
+    controls.moveCellToIndex = (opts: { id: string; toIndex: number }) => {
+      void editor.move(opts.id, opts.toIndex);
+      return false;
+    };
+    controls.moveCell = (opts: { id: string; amount: number }) => {
+      const i = doc.indexOf(opts.id);
+      if (i >= 0) void editor.move(opts.id, i + opts.amount);
+      return false;
+    };
+  }
   const remoteRun = (body: { mode: string; [k: string]: unknown }) => {
     if (!session.abilities.canExecute) return false;
     try {

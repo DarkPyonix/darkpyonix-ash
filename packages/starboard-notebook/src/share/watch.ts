@@ -17,6 +17,8 @@ export interface WatchHandlers {
   /** Replace the outputs shown under a cell. */
   onOutputs: (cellId: string, outputs: unknown[]) => void;
   onEnd: (why: WatchEnd) => void;
+  /** A kernel event without a 2025 name (`doc.cell.created`, ...), PROTOCOL section 5.3 `event`. */
+  onEvent?: (type: string, data: any) => void;
   /** Connection state for the banner. */
   onState?: (s: "connecting" | "live" | "reconnecting") => void;
 }
@@ -123,6 +125,11 @@ export class ShareWatch {
   onMessage(m: WsMessage) {
     const cellId = typeof m.cell_id === "string" ? m.cell_id : undefined;
     switch (m.type) {
+      case "event": {
+        const ev = m.event as any;
+        if (ev && typeof ev.type === "string") this.h.onEvent?.(ev.type, ev.data);
+        break;
+      }
       case "history_data":
         for (const e of (m.history as any[]) ?? []) {
           if (e && typeof e.cell_id === "string") this.h.onOutputs(e.cell_id, e.outputs ?? []);
