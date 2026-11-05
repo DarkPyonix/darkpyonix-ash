@@ -421,7 +421,7 @@ describe("FR-S3 edit safety", () => {
     expect(editor.hasPending("a")).toBe(false);
     expect(conflicts).toEqual([]);
     expect(timers.filter((t) => !t.cleared && t.ms === 2000)).toEqual([]); // no retry
-    expect(errors[0]).toContain("유효하지 않습니다");
+    expect(errors).toEqual([]); // a revoked share is reported once, centrally, not by the editor
   });
   it("test_fr_a3_after_dispose", async () => {
     const { editor } = setupEditor(() => ok({}));

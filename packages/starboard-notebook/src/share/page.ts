@@ -9,7 +9,7 @@
  */
 
 import { abilitiesOf, describeCapabilities, isReadOnly, ShareAbilities } from "./capabilities";
-import { ShareClient, ShareHttpError, TokenRevokedError } from "./client";
+import { REVOKED_MESSAGE, ShareClient, ShareHttpError, TokenRevokedError } from "./client";
 import { ShareEditor } from "./edit";
 import { ShareDoc } from "./doc";
 import { parseShareLink, ShareLink, stripTokenFromLocation } from "./parse";
@@ -19,7 +19,7 @@ export type ShareFailure = "no_link" | "missing_target" | "revoked" | "unauthori
 export const FAILURE_MESSAGES: Record<ShareFailure, string> = {
   no_link: "공유 링크가 아닙니다",
   missing_target: "공유 링크에 매니저 주소와 커널 정보가 없습니다",
-  revoked: "공유가 폐기되었습니다",
+  revoked: REVOKED_MESSAGE,
   unauthorized: "공유 토큰이 올바르지 않습니다",
   not_found: "공유된 커널을 찾을 수 없습니다",
   network: "매니저에 연결할 수 없습니다",
