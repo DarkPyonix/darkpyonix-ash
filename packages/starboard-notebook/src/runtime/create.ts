@@ -116,12 +116,13 @@ export function setupRuntime(notebook: StarboardNotebookElement): Runtime {
     plugins: new MapRegistry<string, any>(),
   };
 
-  if (parseShareLink(window.location.href)) {
-    // Share page: no service worker (its reload would lose the share token), see mayInitServiceWorker.
-  } else if (mayInitServiceWorker(rt.config.useCrossOriginIsolationServiceWorker, window.location.href)) {
-    initCrossOriginIsolatedServiceWorker();
-  } else {
-    removeCrossOriginIsolatedServiceWorker();
+  // A share page registers no service worker (its reload would lose the share token), see mayInitServiceWorker.
+  if (!parseShareLink(window.location.href)) {
+    if (mayInitServiceWorker(rt.config.useCrossOriginIsolationServiceWorker, window.location.href)) {
+      initCrossOriginIsolatedServiceWorker();
+    } else {
+      removeCrossOriginIsolatedServiceWorker();
+    }
   }
 
   const controls: RuntimeControls = {
