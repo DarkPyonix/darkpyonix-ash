@@ -45,12 +45,15 @@ export class ShareHttpError extends Error {
   }
 }
 
+/** Shown when the share was revoked (SPEC FR-A4, FR-A6). */
+export const REVOKED_MESSAGE = "공유가 해지되었습니다";
+
 /** 401 `token_revoked`, or a verify answer with `blacklisted: true`. */
 export class TokenRevokedError extends ShareHttpError {
   constructor(body: unknown) {
     super(401, body);
     this.code = "token_revoked";
-    this.message = "공유가 폐기되었습니다";
+    this.message = REVOKED_MESSAGE;
   }
 }
 
@@ -68,6 +71,11 @@ export interface ShareClientOptions {
   token: string;
   /** Must match ^[A-Za-z0-9_-]{8,64}$; defaults to a generated id. */
   clientId?: string;
+  /**
+   * Called once, the first time the share turns out to be revoked: a REST answer `401 token_revoked`
+   * or a verify answer with `blacklisted: true`. From then on the client sends nothing.
+   */
+  onRevoked?: () => void;
   /** If known up front; otherwise set by `verify()`. */
   capabilities?: Iterable<Capability>;
   fetchImpl?: typeof fetch;
@@ -114,6 +122,34 @@ export class ShareClient {
     return this.caps;
   }
 
+  private _revoked = false;
+  /** True once the server said the share is revoked; every later call fails locally. */
+  get revoked(): boolean {
+    return this._revoked;
+  }
+  private _shutdown = false;
+  /** True once nothing may be sent any more: the share was revoked or the page ended it. */
+  get blocked(): boolean {
+    return this._revoked || this._shutdown;
+  }
+  /**
+   * Stop all traffic (token no longer valid, connection lost, page ended the share). Later calls
+   * fail locally without a request, like after a revocation.
+   */
+  shutdown() {
+    this._shutdown = true;
+  }
+  private markRevoked() {
+    if (this._revoked) return;
+    this._revoked = true;
+    this.opts.onRevoked?.();
+  }
+  /** Set or replace the revocation callback (the page wires it after connecting). */
+  set onRevoked(fn: (() => void) | undefined) {
+    this.opts.onRevoked = fn;
+    if (fn && this._revoked) fn();
+  }
+
   private redact(s: string): string {
     const t = this.opts.token;
     return t ? s.split(t).join("***").split(encodeURIComponent(t)).join("***") : s;
@@ -129,10 +165,12 @@ export class ShareClient {
   }
 
   private need(c: Capability) {
+    if (this.blocked) throw new TokenRevokedError(null);
     if (!this.caps || !this.caps.has(c)) throw new ShareForbiddenError(c);
   }
 
   private async call(method: string, path: string, body?: unknown, keepalive = false): Promise<any> {
+    if (this.blocked) throw new TokenRevokedError(null); // nothing is sent for a revoked or ended share
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.opts.token}`,
       "X-DarkPyonix-Client": this.clientId,
@@ -156,7 +194,10 @@ export class ShareClient {
       /* empty body */
     }
     if (!resp.ok) {
-      if (resp.status === 401 && errorCode(parsed) === "token_revoked") throw new TokenRevokedError(parsed);
+      if (resp.status === 401 && errorCode(parsed) === "token_revoked") {
+        this.markRevoked();
+        throw new TokenRevokedError(parsed);
+      }
       throw new ShareHttpError(resp.status, parsed);
     }
     return parsed;
@@ -165,7 +206,10 @@ export class ShareClient {
   /** GET /api/kernels/{id}/tokens/{token}/verify: the token's capability set (stored for gating). */
   async verify(): Promise<Set<Capability>> {
     const r = await this.call("GET", `/tokens/${encodeURIComponent(this.opts.token)}/verify`);
-    if (r?.blacklisted === true) throw new TokenRevokedError(r);
+    if (r?.blacklisted === true) {
+      this.markRevoked();
+      throw new TokenRevokedError(r);
+    }
     if (!r || r.valid !== true) throw new ShareHttpError(401, r);
     this.caps = parseCapabilities(r.capabilities);
     return new Set(this.caps);
@@ -236,9 +280,16 @@ export class ShareClient {
    * upgrade (401/403/400) only shows as close with `neverOpened: true`.
    */
   openSocket(h: SocketHandlers): ShareSocket {
+    if (this.blocked) throw new TokenRevokedError(null); // never open a socket (its URL carries the token) for a dead share
     if (!this.wsImpl) throw new Error("WebSocket is not available");
     const ws = new this.wsImpl(this.wsUrl());
-    const sock = new ShareSocket(ws, this.opts.kernelId, this.clientId, () => this.caps);
+    const sock = new ShareSocket(
+      ws,
+      this.opts.kernelId,
+      this.clientId,
+      () => this.caps,
+      () => this._revoked
+    );
     ws.onopen = () => {
       sock.markOpen();
       h.onOpen?.();
@@ -270,7 +321,8 @@ export class ShareSocket {
     private ws: WebSocket,
     private kernelId: string,
     private clientId: string,
-    private caps: () => ReadonlySet<Capability> | undefined
+    private caps: () => ReadonlySet<Capability> | undefined,
+    private revoked: () => boolean = () => false
   ) {}
 
   markOpen() {
@@ -279,6 +331,7 @@ export class ShareSocket {
   }
 
   private need(c: Capability) {
+    if (this.revoked()) throw new TokenRevokedError(null);
     const caps = this.caps();
     if (!caps || !caps.has(c)) throw new ShareForbiddenError(c);
   }

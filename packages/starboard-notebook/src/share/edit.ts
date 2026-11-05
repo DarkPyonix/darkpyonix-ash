@@ -12,7 +12,7 @@
  * the server meanwhile, the PATCH answers 409 conflict instead of silently overwriting it.
  */
 
-import { ShareClient, ShareHttpError } from "./client";
+import { ShareClient, ShareHttpError, TokenRevokedError } from "./client";
 import { utf8Length } from "./html";
 import { DocChange, DocCell, ShareDoc } from "./doc";
 
@@ -40,7 +40,9 @@ export interface EditorHandlers {
   onConflict: (cellId: string) => void;
 }
 
+/** Message for the status line; empty for a revoked share (the page shows that once, centrally). */
 export function editErrorMessage(e: unknown): string {
+  if (e instanceof TokenRevokedError) return "";
   if (e instanceof ShareHttpError) {
     if (e.status === 409 && e.code === "locked") return "다른 사용자가 수정 중인 셀입니다";
     if (e.status === 409) return "다른 곳에서 먼저 수정되어 변경을 저장하지 못했습니다";
@@ -74,6 +76,11 @@ export class ShareEditor {
   }
   private clear(t: unknown) {
     if (t !== undefined) (this.o.clearTimeoutImpl ?? clearTimeout)(t as any);
+  }
+
+  private report(e: unknown) {
+    const m = editErrorMessage(e);
+    if (m) this.h.onError(m);
   }
 
   hasPending(cellId: string) {
@@ -161,7 +168,7 @@ export class ShareEditor {
           this.scheduleRetry(cellId);
           if (this.locked.has(cellId)) this.scheduleUnlock(cellId);
         }
-        this.h.onError(editErrorMessage(e));
+        this.report(e);
       }
     });
   }
@@ -188,7 +195,7 @@ export class ShareEditor {
       try {
         await this.client.unlockCell(cellId, undefined, keepalive);
       } catch (e) {
-        if (!this.closed) this.h.onError(editErrorMessage(e));
+        if (!this.closed) this.report(e);
       }
     });
   }
@@ -200,7 +207,7 @@ export class ShareEditor {
       if (ch) this.h.onChange(ch);
       return cell.cell_id;
     } catch (e) {
-      this.h.onError(editErrorMessage(e));
+      this.report(e);
       return false;
     }
   }
@@ -214,7 +221,7 @@ export class ShareEditor {
       if (ch) this.h.onChange(ch);
       return true;
     } catch (e) {
-      this.h.onError(editErrorMessage(e));
+      this.report(e);
       return false;
     }
   }
@@ -226,7 +233,7 @@ export class ShareEditor {
       if (ch) this.h.onChange(ch);
       return true;
     } catch (e) {
-      this.h.onError(editErrorMessage(e));
+      this.report(e);
       return false;
     }
   }
@@ -289,7 +296,8 @@ export class ShareEditor {
           this.base.delete(id);
         })
       );
-      if (lost.length) this.h.onError(UNSAVED_MESSAGE);
+      // A revoked or ended share is reported once, centrally; do not cover that with this warning.
+      if (lost.length && !this.client.blocked) this.h.onError(UNSAVED_MESSAGE);
     })();
     return this.disposing;
   }

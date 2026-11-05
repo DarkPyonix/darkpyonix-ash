@@ -66,7 +66,16 @@ export class ShareWatch {
     const gen = ++this.generation;
     this.gotMessage = false;
     this.h.onState?.(this.retries ? "reconnecting" : "connecting");
-    this.socket = this.client.openSocket({
+    try {
+      this.socket = this.openSocket(gen);
+    } catch {
+      // the client is blocked (revoked or ended): do not retry
+      this.end(this.client.revoked ? "revoked" : "lost");
+    }
+  }
+
+  private openSocket(gen: number): ShareSocket {
+    return this.client.openSocket({
       onOpen: () => {
         if (gen !== this.generation) return;
         // Not reset here: a socket that opens and closes at once must not restart the backoff.

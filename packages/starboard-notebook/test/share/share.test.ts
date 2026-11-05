@@ -9,6 +9,8 @@ import {
   ShareForbiddenError,
   ShareNetworkError,
   TokenRevokedError,
+  REVOKED_MESSAGE,
+  FAILURE_MESSAGES,
   generateClientId,
   CLIENT_ID_RE,
 } from "../../src/share";
@@ -152,6 +154,7 @@ describe("FR-A3 REST client", () => {
 
 class FakeWs {
   static last: FakeWs;
+  static all: FakeWs[] = [];
   sent: string[] = [];
   onopen: any;
   onerror: any;
@@ -160,6 +163,7 @@ class FakeWs {
   open = false;
   constructor(public url: string) {
     FakeWs.last = this;
+    FakeWs.all.push(this);
   }
   send(s: string) {
     if (!this.open) throw new Error("InvalidStateError");
@@ -316,5 +320,157 @@ describe("FR-S9 WebSocket client", () => {
     FakeWs.last.doOpen();
     expect(() => s.startTyping("c1")).toThrow(ShareForbiddenError);
     expect(FakeWs.last.sent).toEqual([]);
+  });
+});
+
+describe("FR-A3 revoked share state", () => {
+  const revokedBody = { error: { code: "token_revoked", message: "revoked" } };
+  const all = ["read", "history", "execute", "edit", "manage"];
+  const mk = (f: any, onRevoked?: () => void) =>
+    new ShareClient({
+      managerUrl: "http://m:1",
+      kernelId: "k1",
+      token: TOKEN,
+      capabilities: all as any,
+      fetchImpl: f,
+      webSocketImpl: FakeWs as any,
+      onRevoked,
+    });
+  const everyCall = (c: ShareClient): Array<() => Promise<unknown>> => [
+    () => c.document(),
+    () => c.runs(),
+    () => c.run({ mode: "all" }),
+    () => c.interrupt(),
+    () => c.createCell({}),
+    () => c.updateCell("c1", { base_version: 1, source: "x" }),
+    () => c.deleteCell("c1", 1),
+    () => c.moveCell("c1", 2),
+    () => c.lockCell("c1"),
+    () => c.unlockCell("c1"),
+    () => c.verify(),
+  ];
+
+  it("test_fr_a3_message_is_korean_and_the_same_everywhere", () => {
+    expect(REVOKED_MESSAGE).toBe("공유가 해지되었습니다");
+    expect(FAILURE_MESSAGES.revoked).toBe(REVOKED_MESSAGE);
+    expect(new TokenRevokedError(null).message).toBe(REVOKED_MESSAGE);
+  });
+
+  it("test_fr_a3_any_rest_401_token_revoked_marks_the_share_revoked_once", async () => {
+    const f = jest.fn().mockResolvedValue(ok(revokedBody, 401));
+    const seen = jest.fn();
+    const c = mk(f, seen);
+    await expect(c.interrupt()).rejects.toBeInstanceOf(TokenRevokedError);
+    expect(c.revoked).toBe(true);
+    expect(seen).toHaveBeenCalledTimes(1);
+    expect(() => c.document()).toThrow(TokenRevokedError); // blocked locally, synchronously
+    expect(seen).toHaveBeenCalledTimes(1);
+  });
+
+  it("test_fr_a3_after_revocation_every_operation_is_blocked_without_a_request", async () => {
+    const f = jest.fn().mockResolvedValue(ok(revokedBody, 401));
+    const c = mk(f);
+    await c.document().catch(() => undefined);
+    f.mockClear();
+    for (const call of everyCall(c)) {
+      let thrown: unknown;
+      try {
+        await call();
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(TokenRevokedError);
+    }
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("test_fr_a3_concurrent_in_flight_requests_fire_on_revoked_once", async () => {
+    const f = jest.fn().mockResolvedValue(ok(revokedBody, 401));
+    const seen = jest.fn();
+    const c = mk(f, seen);
+    const results = await Promise.allSettled([c.document(), c.runs(), c.interrupt(), c.lockCell("c1")]);
+    expect(results.every((r) => r.status === "rejected")).toBe(true);
+    expect(f).toHaveBeenCalledTimes(4); // all four were in flight before the first answer
+    expect(seen).toHaveBeenCalledTimes(1);
+  });
+  it("test_fr_a3_shutdown_blocks_everything_like_a_revocation", async () => {
+    const f = jest.fn();
+    const c = mk(f);
+    expect(c.blocked).toBe(false);
+    c.shutdown();
+    expect(c.blocked).toBe(true);
+    expect(c.revoked).toBe(false); // ended by the page, not revoked by the server
+    for (const call of everyCall(c)) {
+      await expect(Promise.resolve().then(call)).rejects.toBeInstanceOf(TokenRevokedError);
+    }
+    expect(() => c.openSocket({ onMessage: () => undefined })).toThrow(TokenRevokedError);
+    expect(f).not.toHaveBeenCalled();
+  });
+  it("test_fr_a3_no_socket_is_opened_for_a_revoked_share", async () => {
+    const f = jest.fn().mockResolvedValue(ok(revokedBody, 401));
+    const c = mk(f);
+    await c.document().catch(() => undefined);
+    const before = FakeWs.all?.length ?? 0;
+    expect(() => c.openSocket({ onMessage: () => undefined })).toThrow(TokenRevokedError);
+    expect(FakeWs.all?.length ?? 0).toBe(before);
+  });
+  it("test_fr_a3_verify_blacklisted_marks_the_share_revoked", async () => {
+    const f = jest.fn().mockResolvedValue(ok({ valid: true, blacklisted: true, capabilities: ["read"] }));
+    const seen = jest.fn();
+    const c = mk(f, seen);
+    await expect(c.verify()).rejects.toBeInstanceOf(TokenRevokedError);
+    expect(seen).toHaveBeenCalledTimes(1);
+    expect(c.revoked).toBe(true);
+  });
+
+  it("test_fr_a3_other_401_and_403_do_not_revoke", async () => {
+    for (const [status, code] of [
+      [401, "unauthorized"],
+      [403, "forbidden"],
+      [404, "not_found"],
+      [500, "internal"],
+    ] as const) {
+      const f = jest.fn().mockResolvedValue(ok({ error: { code, message: "x" } }, status));
+      const seen = jest.fn();
+      const c = mk(f, seen);
+      await c.document().catch(() => undefined);
+      expect(c.revoked).toBe(false);
+      expect(seen).not.toHaveBeenCalled();
+    }
+  });
+
+  it("test_fr_a3_revocation_blocks_the_socket_too", async () => {
+    const f = jest.fn().mockResolvedValue(ok(revokedBody, 401));
+    const c = mk(f);
+    const s = c.openSocket({ onMessage: () => undefined });
+    FakeWs.last.doOpen();
+    await c.document().catch(() => undefined);
+    expect(() => s.requestCode()).toThrow(TokenRevokedError);
+    expect(() => s.startTyping("c1")).toThrow(TokenRevokedError);
+    expect(FakeWs.last.sent).toEqual([]);
+  });
+
+  it("test_fr_a3_a_callback_set_after_revocation_still_fires", async () => {
+    const f = jest.fn().mockResolvedValue(ok(revokedBody, 401));
+    const c = mk(f);
+    await c.document().catch(() => undefined);
+    const late = jest.fn();
+    c.onRevoked = late;
+    expect(late).toHaveBeenCalledTimes(1);
+  });
+
+  it("test_fr_a3_revoked_share_without_read_is_noticed_by_the_next_rest_call", async () => {
+    const f = jest.fn().mockResolvedValue(ok(revokedBody, 401));
+    const seen = jest.fn();
+    const c = new ShareClient({
+      managerUrl: "http://m:1",
+      kernelId: "k1",
+      token: TOKEN,
+      capabilities: ["execute"],
+      fetchImpl: f,
+      onRevoked: seen,
+    });
+    await c.interrupt().catch(() => undefined);
+    expect(seen).toHaveBeenCalledTimes(1); // no socket, no polling: the REST answer is enough
   });
 });

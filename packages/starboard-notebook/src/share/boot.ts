@@ -3,10 +3,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import { Runtime } from "../types";
-import { documentToCells, connectShare, gateControls, ShareConnectError, ShareSession } from "./page";
+import { documentToCells, connectShare, gateControls, shouldWatch, ShareConnectError, ShareSession } from "./page";
 import { parseShareLink } from "./parse";
 import { outputsToElement } from "./outputs";
 import { ShareWatch } from "./watch";
+import { TokenRevokedError } from "./client";
+import { createShareEnder } from "./end";
+import { shareErrorMessage } from "./page";
 import { ShareDoc, DocChange } from "./doc";
 import { ShareEditor } from "./edit";
 import { arrayMoveElement } from "../components/helpers/array";
@@ -46,6 +49,10 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
       const outputsCache = new Map<string, unknown>();
       const watchedIds = new Set<string>();
       const err = (msg: string) => showStatus(msg, true);
+      /** A revoked share is reported once by endShare, not by every failing call. */
+      const failed = (prefix: string) => (e: unknown) => {
+        if (!(e instanceof TokenRevokedError)) err(`${prefix}: ${shareErrorMessage(e)}`);
+      };
       let editor: ShareEditor | undefined;
 
       /** Local edits of a cell go to the editor (debounced lock + PATCH). */
@@ -123,31 +130,15 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
           }
         });
       }
-      gateControls(
-        rt.controls as any,
-        session,
-        (e) => err(`실행하지 못했습니다: ${(e as Error).message}`),
-        editor && { editor, doc }
-      );
+      gateControls(rt.controls as any, session, failed("실행하지 못했습니다"), editor && { editor, doc });
       rt.content.cells.push(...(documentToCells(session.cells, editable) as any));
       session.cells.forEach((c) => watchCell(c.cell_id));
       rt.dom.notebook.requestUpdate();
       if (session.abilities.canExecute) {
-        rt.dom.notebook.shareInterrupt = () =>
-          session.client.interrupt().catch((e: unknown) => err(`중단하지 못했습니다: ${(e as Error).message}`));
+        rt.dom.notebook.shareInterrupt = () => session.client.interrupt().catch(failed("중단하지 못했습니다"));
       }
       showStatus(session.banner, false);
 
-      if (!session.abilities.canSeeOutputs && !editable) return;
-      const put = (id: string, outs: unknown) => {
-        outputsCache.set(id, outs);
-        showOutputs(rt, id, outs);
-      };
-      if (session.abilities.canSeeOutputs) {
-        rt.dom.notebook.updateComplete.then(() => {
-          for (const c of session.cells) put(c.cell_id, (c as any).outputs ?? []);
-        });
-      }
       /** Block every operation of the share page (run, edit, interrupt). */
       const blockAll = () => {
         const blocked = () => false;
@@ -157,7 +148,27 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
         rt.controls.runAllCells = async () => false;
         rt.dom.notebook.shareInterrupt = undefined;
       };
-      const watch = new ShareWatch(session.client, {
+      let watch: ShareWatch | undefined;
+      const endShare = createShareEnder({
+        client: session.client,
+        watch: () => watch,
+        editor: () => editor,
+        blockControls: blockAll,
+        showStatus,
+      });
+      session.client.onRevoked = () => endShare("revoked");
+
+      if (!shouldWatch(session.abilities)) return;
+      const put = (id: string, outs: unknown) => {
+        outputsCache.set(id, outs);
+        showOutputs(rt, id, outs);
+      };
+      if (session.abilities.canSeeOutputs) {
+        rt.dom.notebook.updateComplete.then(() => {
+          for (const c of session.cells) put(c.cell_id, (c as any).outputs ?? []);
+        });
+      }
+      const w = new ShareWatch(session.client, {
         onOutputs: (id, outs) => {
           if (session.abilities.canSeeOutputs) put(id, outs);
         },
@@ -166,18 +177,7 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
           if (ch) applyChange(ch);
         },
         onState: (st) => showStatus(`${session.banner}${st === "reconnecting" ? " (다시 연결하는 중...)" : ""}`, false),
-        onEnd: (why) => {
-          blockAll();
-          void editor?.dispose(); // free locks and stop retries; errors are swallowed
-          showStatus(
-            why === "revoked"
-              ? "공유가 폐기되었습니다"
-              : why === "unauthorized"
-              ? "공유 토큰이 더 이상 유효하지 않습니다"
-              : "매니저와 연결이 끊겼습니다. 페이지를 다시 불러오세요",
-            true
-          );
-        },
+        onEnd: endShare,
       });
       // Restored from the back/forward cache: the socket and editor were closed on pagehide and the
       // token is no longer in the address bar, so the page cannot reconnect by itself.
@@ -186,8 +186,9 @@ export function bootShare(rt: Runtime, showStatus: (text: string, isError: boole
         blockAll();
         showStatus("페이지가 이전 상태로 복원되었습니다. 공유 링크로 다시 접속하세요", true);
       });
-      watch.start();
-      window.addEventListener("pagehide", () => watch.stop(), { once: true });
+      watch = w;
+      w.start();
+      window.addEventListener("pagehide", () => w.stop(), { once: true });
     })
     .catch((e) => {
       showStatus(e instanceof ShareConnectError ? e.message : "공유에 연결하지 못했습니다", true);
