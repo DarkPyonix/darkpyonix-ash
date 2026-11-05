@@ -28,6 +28,12 @@ describe("FR-A2 share link", () => {
     expect(parseShareLink(`https://x.test/s/${SID}`)).toBeNull();
     expect(parseShareLink("not a url")).toBeNull();
   });
+  it("test_fr_a2_plain_anchor_is_not_a_share_link", () => {
+    expect(parseShareLink("https://x.test/index.html#anchor")).toBeNull();
+    expect(parseShareLink("https://x.test/ash/#section-2")).toBeNull();
+    expect(parseShareLink("https://x.test/ash/?manager=http://m:1#abc")).toBeNull();
+    expect(parseShareLink("https://x.test/ash/#token=abc")?.token).toBe("abc");
+  });
   it("test_fr_a2_direct_mode_reads_manager_and_kernel", () => {
     const l = parseShareLink(`https://x.test/ash/?manager=http://127.0.0.1:8765/&kernel=k_1#${TOKEN}`);
     expect(l).toMatchObject({ managerUrl: "http://127.0.0.1:8765", kernelId: "k_1", token: TOKEN });

@@ -28,6 +28,7 @@ import {
   updateIframeWhenSizeChanges,
 } from "./core";
 import { createExports } from "./exports";
+import { bootShare } from "../share/boot";
 import { OutboundNotebookMessage } from "../types/messages";
 import { StarboardPlugin } from "../types/plugins";
 import { arrayMoveElement } from "../components/helpers/array";
@@ -361,6 +362,9 @@ export function setupRuntime(notebook: StarboardNotebookElement): Runtime {
   rt.exports = createExports();
 
   setupGlobalKeybindings(rt);
+
+  // Share link (FR-A2, FR-A3): a share page shows the remote notebook under its capability gates.
+  notebook.isShareMode = bootShare(rt, (text, isError) => notebook.setShareStatus(text, isError));
 
   /** Initialize certain functionality */
   updateCellsWhenCellDefinitionChanges(rt);
