@@ -29,6 +29,7 @@ import {
 } from "./core";
 import { createExports } from "./exports";
 import { bootShare } from "../share/boot";
+import { mayInitServiceWorker, parseShareLink } from "../share/parse";
 import { OutboundNotebookMessage } from "../types/messages";
 import { StarboardPlugin } from "../types/plugins";
 import { arrayMoveElement } from "../components/helpers/array";
@@ -115,7 +116,9 @@ export function setupRuntime(notebook: StarboardNotebookElement): Runtime {
     plugins: new MapRegistry<string, any>(),
   };
 
-  if (rt.config.useCrossOriginIsolationServiceWorker !== false) {
+  if (parseShareLink(window.location.href)) {
+    // Share page: no service worker (its reload would lose the share token), see mayInitServiceWorker.
+  } else if (mayInitServiceWorker(rt.config.useCrossOriginIsolationServiceWorker, window.location.href)) {
     initCrossOriginIsolatedServiceWorker();
   } else {
     removeCrossOriginIsolatedServiceWorker();

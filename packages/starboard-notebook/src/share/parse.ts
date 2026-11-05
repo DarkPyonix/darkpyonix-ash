@@ -54,3 +54,13 @@ export function stripTokenFromLocation(href: string): string {
   url.searchParams.delete("token");
   return url.toString();
 }
+
+/**
+ * Whether ash may register its cross-origin-isolation service worker. That worker reloads the page
+ * once to take control, and a reload would lose the share token (it is removed from the address bar
+ * right after reading), so a share page never registers it: it runs no local Python.
+ */
+export function mayInitServiceWorker(useServiceWorker: boolean | undefined, href: string): boolean {
+  if (parseShareLink(href)) return false;
+  return useServiceWorker !== false;
+}
