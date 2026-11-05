@@ -13,8 +13,14 @@
  * and scrolls.
  */
 
-/** Largest HTML output rendered; bigger ones fall back to `text/plain`. */
+/** Largest HTML output rendered, in UTF-8 bytes; bigger ones fall back to `text/plain`. */
 export const MAX_HTML_BYTES = 1_000_000;
+
+export function utf8Length(s: string): number {
+  return typeof TextEncoder !== "undefined"
+    ? new TextEncoder().encode(s).length
+    : unescape(encodeURIComponent(s)).length;
+}
 
 export const SANDBOX_CSP =
   "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'; frame-src 'none'; connect-src 'none'; script-src 'none'";
@@ -47,6 +53,9 @@ const DROP = new Set([
   "use",
   "template",
   "noscript",
+  // image maps: <area href target> cannot be forced to a safe target and could navigate the frame
+  "map",
+  "area",
 ]);
 
 const URL_ATTRS = new Set([

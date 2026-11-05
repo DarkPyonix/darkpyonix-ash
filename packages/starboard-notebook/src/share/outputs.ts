@@ -8,7 +8,7 @@
  * is ever inserted into the page itself.
  */
 
-import { htmlOutputBlock, MAX_HTML_BYTES } from "./html";
+import { htmlOutputBlock, MAX_HTML_BYTES, utf8Length } from "./html";
 
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
@@ -52,7 +52,7 @@ export function outputToElement(doc: Document, out: any): HTMLElement | null {
     }
     const html = text(data["text/html"]);
     const plain = text(data["text/plain"]);
-    if (html && html.length <= MAX_HTML_BYTES) return htmlOutputBlock(doc, html, stripAnsi(plain));
+    if (html && utf8Length(html) <= MAX_HTML_BYTES) return htmlOutputBlock(doc, html, stripAnsi(plain));
     if (plain) {
       const pre = doc.createElement("pre");
       pre.className = "share-output-text";
