@@ -7,4 +7,5 @@ export * from "./watch";
 export * from "./doc";
 export * from "./edit";
 export * from "./html";
+export * from "./sandbox";
 export * from "./end";
