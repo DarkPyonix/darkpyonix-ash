@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: dev-ci
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  js_ci:
+    uses: ./.github/workflows/js-ci.yml
+    secrets: inherit
